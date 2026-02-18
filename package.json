@@ -1,0 +1,27 @@
+{
+  "name": "molt-combat",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["apps/*", "packages/*", "contracts"],
+  "scripts": {
+    "build": "npm run --workspaces build",
+    "dev": "concurrently \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm --workspace apps/api run dev",
+    "dev:web": "npm --workspace apps/web run dev",
+    "dev:agent:a": "node scripts/mockAgentA.mjs",
+    "dev:agent:b": "node scripts/mockAgentB.mjs",
+    "dev:agents": "concurrently \"npm:dev:agent:a\" \"npm:dev:agent:b\"",
+    "dev:full": "concurrently \"npm:dev:api\" \"npm:dev:web\" \"npm:dev:agent:a\" \"npm:dev:agent:b\"",
+    "test": "npm run --workspaces test",
+    "lint": "npm run --workspaces lint",
+    "verify:tee": "node scripts/verify-eigencompute.mjs",
+    "escrow:player:deposit": "node scripts/playerDepositEscrow.mjs",
+    "escrow:status": "node scripts/escrowStatus.mjs",
+    "deploy:first": "bash scripts/prod-first-deploy.sh",
+    "release:prod": "bash scripts/prod-release.sh"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  }
+}

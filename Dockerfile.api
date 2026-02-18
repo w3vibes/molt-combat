@@ -1,0 +1,19 @@
+ARG TARGETPLATFORM=linux/amd64
+FROM --platform=$TARGETPLATFORM node:22
+
+WORKDIR /app
+COPY package*.json ./
+COPY apps/api/package*.json apps/api/
+
+RUN npm config set fetch-retries 5 \
+ && npm config set fetch-retry-factor 2 \
+ && npm config set fetch-retry-mintimeout 20000 \
+ && npm config set fetch-retry-maxtimeout 120000 \
+ && (npm ci --no-audit --fund=false || npm ci --no-audit --fund=false || npm ci --no-audit --fund=false)
+
+COPY . .
+RUN npm --workspace apps/api run build
+
+EXPOSE 3000
+USER root
+CMD ["npm", "--workspace", "apps/api", "run", "start"]

@@ -1,0 +1,16 @@
+node_modules
+.next
+dist
+.env
+.env.*
+coverage
+artifacts
+cache
+out
+
+# runtime local state
+.data/
+apps/api/.data/
+
+# foundry deploy logs (timestamped)
+contracts/broadcast/**/run-[0-9]*.json

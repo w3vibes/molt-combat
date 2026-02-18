@@ -1,0 +1,10 @@
+{
+  "name": "@molt/contracts",
+  "version": "0.1.0",
+  "scripts": {
+    "build": "forge build",
+    "test": "FOUNDRY_OFFLINE=true forge test -vv",
+    "deploy:sepolia": "bash -lc 'export PAYOUT_SIGNER_PRIVATE_KEY=${PAYOUT_SIGNER_PRIVATE_KEY:-$OPERATOR_PRIVATE_KEY}; forge script script/DeployMoltPrizePool.s.sol:DeployMoltPrizePool --rpc-url $SEPOLIA_RPC_URL --broadcast'",
+    "deploy:usdc-escrow:sepolia": "bash -lc 'export PAYOUT_SIGNER_PRIVATE_KEY=${PAYOUT_SIGNER_PRIVATE_KEY:-$OPERATOR_PRIVATE_KEY}; forge script script/DeployMoltUSDCMatchEscrow.s.sol:DeployMoltUSDCMatchEscrow --rpc-url $SEPOLIA_RPC_URL --broadcast'"
+  }
+}

@@ -1,0 +1,12 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-background text-foreground;
+  background-image: radial-gradient(circle at top, #1b2652 0%, #080b16 45%, #05070d 100%);
+}
+
+.container {
+  @apply mx-auto max-w-6xl p-6 md:p-8;
+}

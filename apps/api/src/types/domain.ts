@@ -1,0 +1,199 @@
+export type Resource = 'energy' | 'metal' | 'data';
+
+export type SandboxProfile = {
+  runtime: string;
+  version: string;
+  cpu: number;
+  memory: number;
+};
+
+export type AgentProfile = {
+  id: string;
+  name: string;
+  endpoint: string;
+  apiKey?: string;
+  payoutAddress?: string;
+};
+
+export type AgentAction =
+  | { type: 'gather'; resource: Resource; amount: number }
+  | { type: 'trade'; give: Resource; receive: Resource; amount: number }
+  | { type: 'attack'; targetAgentId: string; amount: number }
+  | { type: 'hold' };
+
+export type AgentState = {
+  agentId: string;
+  hp: number;
+  wallet: Record<Resource, number>;
+  score: number;
+};
+
+export type MatchConfig = {
+  maxTurns: number;
+  seed: number;
+  attackCost: number;
+  attackDamage: number;
+};
+
+export type MatchTurnEnforcement = {
+  timeout: boolean;
+  schemaValidation: boolean;
+  sandboxParity: boolean;
+};
+
+export type MatchTurnMetering = {
+  agentId: string;
+  latencyMs: number;
+  requestBytes: number;
+  responseBytes: number;
+  timeoutMs: number;
+  httpStatus?: number;
+  timedOut: boolean;
+  fallbackHold: boolean;
+  invalidAction: boolean;
+  enforcement: MatchTurnEnforcement;
+  error?: string;
+};
+
+export type MatchReplayTurn = {
+  turn: number;
+  actions: Record<string, AgentAction>;
+  states: AgentState[];
+  metering?: Record<string, MatchTurnMetering>;
+};
+
+export type MatchFairnessAudit = {
+  sandboxParityRequired: boolean;
+  sandboxParityEnforced: boolean;
+  sandboxParityPassed: boolean;
+  sandboxProfiles?: Record<string, SandboxProfile>;
+  rejectionReason?: string;
+};
+
+export type MatchMeteringTotals = {
+  requestBytes: number;
+  responseBytes: number;
+  timeouts: number;
+  fallbackHolds: number;
+  invalidActions: number;
+};
+
+export type MatchAuditRecord = {
+  fairness: MatchFairnessAudit;
+  meteringTotals: MatchMeteringTotals;
+};
+
+export type MatchRecord = {
+  id: string;
+  status: 'pending' | 'running' | 'finished' | 'failed';
+  startedAt: string;
+  turnsPlayed: number;
+  winner?: string;
+  scorecardHash?: string;
+  agents: AgentProfile[];
+  replay: MatchReplayTurn[];
+  config: MatchConfig;
+  audit?: MatchAuditRecord;
+};
+
+export type MatchAttestationPayload = {
+  matchId: string;
+  startedAt: string;
+  turnsPlayed: number;
+  winner: string;
+  scorecardHash: string;
+  replayHash: string;
+  auditHash: string;
+  agentIds: string[];
+};
+
+export type MatchAttestationRecord = {
+  matchId: string;
+  signerAddress: string;
+  signature: string;
+  signatureType: 'eip191';
+  payloadHash: string;
+  payload: MatchAttestationPayload;
+  createdAt: string;
+};
+
+export type ChallengeStatus = 'open' | 'accepted' | 'running' | 'awaiting_judgement' | 'completed' | 'cancelled';
+
+export type ChallengeStake = {
+  mode: 'none' | 'usdc';
+  contractAddress?: string;
+  amountPerPlayer?: string;
+  playerA?: string;
+  playerB?: string;
+};
+
+export type ChallengeRecord = {
+  id: string;
+  topic: string;
+  status: ChallengeStatus;
+  challengerAgentId: string;
+  opponentAgentId?: string;
+  config: MatchConfig;
+  stake: ChallengeStake;
+  matchId?: string;
+  winnerAgentId?: string;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AgentInstallInvite = {
+  id: string;
+  note?: string;
+  createdAt: string;
+  expiresAt?: string;
+  usedAt?: string;
+  usedByAgentId?: string;
+  status: 'active' | 'used' | 'expired';
+  tokenPreview: string;
+};
+
+export type MarketStatus = 'open' | 'locked' | 'resolved' | 'cancelled';
+export type MarketSubjectType = 'match' | 'challenge';
+
+export type MarketPayout = {
+  bettor: string;
+  amount: string;
+};
+
+export type BettingMarketRecord = {
+  id: string;
+  subjectType: MarketSubjectType;
+  subjectId: string;
+  status: MarketStatus;
+  outcomes: string[];
+  feeBps: number;
+  totalPool: string;
+  payoutPool: string;
+  feeAmount: string;
+  resultOutcome?: string;
+  payouts?: MarketPayout[];
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+  lockedAt?: string;
+  resolvedAt?: string;
+  updatedAt: string;
+};
+
+export type MarketPositionRecord = {
+  id: string;
+  marketId: string;
+  bettor: string;
+  outcome: string;
+  amount: string;
+  createdAt: string;
+};
+
+export type AutomationRunRecord = {
+  id: string;
+  automationType: 'escrow_settlement';
+  status: 'ok' | 'error';
+  startedAt: string;
+  finishedAt: string;
+  summary: Record<string, unknown>;
+};
