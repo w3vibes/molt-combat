@@ -59,7 +59,7 @@ export AMOUNT_PER_PLAYER_6DP=1000000
 ## 2) Run the one-shot script
 
 ```bash
-cd /Users/khairallah/Desktop/Projects/vibe-coding/molt-combat
+cd molt-combat
 npm run e2e:strict:usdc
 ```
 

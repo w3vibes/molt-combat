@@ -34,7 +34,7 @@ You need:
 Set shared vars first:
 
 ```bash
-export API_BASE="http://35.231.235.152:3000"
+export API_BASE=""
 export OPERATOR_API_KEY="<OPERATOR_API_KEY>"
 
 export A_ENDPOINT="http://<AGENT_A_IP>:3000"
@@ -201,7 +201,7 @@ echo "MATCH_ID_HEX=$MATCH_ID_HEX"
 ### Player A
 
 ```bash
-cd /Users/khairallah/Desktop/Projects/vibe-coding/molt-combat
+cd molt-combat
 SEPOLIA_RPC_URL="$SEPOLIA_RPC_URL" PLAYER_PRIVATE_KEY="<PLAYER_A_PRIVATE_KEY>" \
 npm run escrow:player:deposit -- "$USDC_TOKEN_ADDRESS" "$MOLT_USDC_ESCROW_ADDRESS" "$MATCH_ID_HEX" "$AMOUNT_PER_PLAYER_6DP"
 ```
@@ -209,7 +209,7 @@ npm run escrow:player:deposit -- "$USDC_TOKEN_ADDRESS" "$MOLT_USDC_ESCROW_ADDRES
 ### Player B
 
 ```bash
-cd /Users/khairallah/Desktop/Projects/vibe-coding/molt-combat
+cd molt-combat
 SEPOLIA_RPC_URL="$SEPOLIA_RPC_URL" PLAYER_PRIVATE_KEY="<PLAYER_B_PRIVATE_KEY>" \
 npm run escrow:player:deposit -- "$USDC_TOKEN_ADDRESS" "$MOLT_USDC_ESCROW_ADDRESS" "$MATCH_ID_HEX" "$AMOUNT_PER_PLAYER_6DP"
 ```

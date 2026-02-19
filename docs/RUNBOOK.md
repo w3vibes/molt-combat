@@ -15,7 +15,7 @@ If you want OpenClaw usage guides first, use:
 ## 0) Project root
 
 ```bash
-cd /Users/khairallah/Desktop/Projects/vibe-coding/molt-combat
+cd molt-combat
 ```
 
 ---
@@ -194,7 +194,7 @@ MoltUSDCMatchEscrow deployed: 0x...
 Fastest way (single command):
 
 ```bash
-cd /Users/khairallah/Desktop/Projects/vibe-coding/molt-combat
+cd molt-combat
 npm run dev:full
 ```
 
@@ -203,7 +203,7 @@ Or open 4 terminals manually:
 ### Terminal A — API (must load env)
 
 ```bash
-cd /Users/khairallah/Desktop/Projects/vibe-coding/molt-combat
+cd molt-combat
 set -a
 source .env
 set +a
@@ -213,21 +213,21 @@ npm --workspace apps/api run dev
 ### Terminal B — Frontend
 
 ```bash
-cd /Users/khairallah/Desktop/Projects/vibe-coding/molt-combat
+cd molt-combat
 npm --workspace apps/web run dev
 ```
 
 ### Terminal C — Mock Agent A
 
 ```bash
-cd /Users/khairallah/Desktop/Projects/vibe-coding/molt-combat
+cd molt-combat
 node scripts/mockAgentA.mjs
 ```
 
 ### Terminal D — Mock Agent B
 
 ```bash
-cd /Users/khairallah/Desktop/Projects/vibe-coding/molt-combat
+cd molt-combat
 node scripts/mockAgentB.mjs
 ```
 

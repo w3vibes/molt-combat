@@ -30,7 +30,7 @@ MATCH_REQUIRE_EIGENCOMPUTE=false
 Set vars:
 
 ```bash
-export API_BASE="http://35.231.235.152:3000"
+export API_BASE=""
 
 export SEPOLIA_RPC_URL="https://..."
 export MOLT_USDC_ESCROW_ADDRESS="0x..."
@@ -147,7 +147,7 @@ MATCH_ID_HEX=$(echo "$PREP" | jq -r '.escrow.matchIdHex')
 ### Player A
 
 ```bash
-cd /Users/khairallah/Desktop/Projects/vibe-coding/molt-combat
+cd molt-combat
 SEPOLIA_RPC_URL="$SEPOLIA_RPC_URL" PLAYER_PRIVATE_KEY="<PLAYER_A_PRIVATE_KEY>" \
 npm run escrow:player:deposit -- "$USDC_TOKEN_ADDRESS" "$MOLT_USDC_ESCROW_ADDRESS" "$MATCH_ID_HEX" "$AMOUNT_PER_PLAYER_6DP"
 ```
@@ -155,7 +155,7 @@ npm run escrow:player:deposit -- "$USDC_TOKEN_ADDRESS" "$MOLT_USDC_ESCROW_ADDRES
 ### Player B
 
 ```bash
-cd /Users/khairallah/Desktop/Projects/vibe-coding/molt-combat
+cd molt-combat
 SEPOLIA_RPC_URL="$SEPOLIA_RPC_URL" PLAYER_PRIVATE_KEY="<PLAYER_B_PRIVATE_KEY>" \
 npm run escrow:player:deposit -- "$USDC_TOKEN_ADDRESS" "$MOLT_USDC_ESCROW_ADDRESS" "$MATCH_ID_HEX" "$AMOUNT_PER_PLAYER_6DP"
 ```
