@@ -12,9 +12,15 @@ function parseOrReply<T extends z.ZodTypeAny>(schema: T, input: unknown, reply: 
   return parsed.data;
 }
 import { checkAgentHealth } from '../services/agentClient.js';
-import { createEscrowMatch, settleEscrowMatch } from '../services/escrow.js';
+import { createEscrowMatch, getEscrowMatchStatus, settleEscrowMatch } from '../services/escrow.js';
 import { autoResolveMarketsForMatch } from '../services/markets.js';
-import { checkSandboxParity, sandboxParityRequiredByDefault } from '../services/fairness.js';
+import {
+  endpointExecutionRequiredByDefault,
+  evaluateStrictSandboxPolicy,
+  resolveAgentExecutionMode,
+  simpleModeEnabledByDefault,
+  toMatchFairnessAudit
+} from '../services/fairness.js';
 import { runEscrowSettlementTick } from '../services/automation.js';
 import { signMatchAttestation } from '../services/attestation.js';
 import { RegisteredAgent, store } from '../services/store.js';
@@ -56,14 +62,8 @@ const actionSchema = z.union([
   z.object({ type: z.literal('hold') })
 ]);
 
-function resolveAgentMode(agent: RegisteredAgent): 'simple' | 'endpoint' {
-  const metadataMode = typeof agent.metadata?.agentMode === 'string' ? agent.metadata.agentMode : undefined;
-  if (metadataMode === 'simple' || metadataMode === 'endpoint') return metadataMode;
-  return agent.endpoint.startsWith('https://agent.local/') ? 'simple' : 'endpoint';
-}
-
 function shouldUseSimpleMode(challenger: RegisteredAgent, opponent: RegisteredAgent): boolean {
-  return resolveAgentMode(challenger) === 'simple' || resolveAgentMode(opponent) === 'simple';
+  return resolveAgentExecutionMode(challenger) === 'simple' || resolveAgentExecutionMode(opponent) === 'simple';
 }
 
 function initialState(agentId: string): AgentState {
@@ -129,12 +129,20 @@ function currentTurnForMatch(match: MatchRecord): number {
   return match.turnsPlayed + 1;
 }
 
-function defaultManualAudit() {
+function defaultManualAudit(fairnessOverride?: NonNullable<MatchRecord['audit']>['fairness']) {
   return {
-    fairness: {
+    fairness: fairnessOverride ?? {
       sandboxParityRequired: false,
       sandboxParityEnforced: false,
-      sandboxParityPassed: true
+      sandboxParityPassed: true,
+      executionMode: 'simple',
+      endpointExecutionRequired: endpointExecutionRequiredByDefault(),
+      endpointExecutionPassed: !endpointExecutionRequiredByDefault(),
+      eigenComputeRequired: false,
+      eigenComputeEnforced: false,
+      eigenComputePassed: true,
+      strictVerified: false,
+      rejectionReason: endpointExecutionRequiredByDefault() ? 'endpoint_execution_required' : undefined
     },
     meteringTotals: {
       requestBytes: 0,
@@ -179,19 +187,23 @@ async function runChallengeMatch(params: {
   challenger: RegisteredAgent;
   opponent: RegisteredAgent;
   config: MatchConfig;
+  fairnessAudit: NonNullable<MatchRecord['audit']>['fairness'];
+  matchId: string;
 }) {
-  const parity = checkSandboxParity(
-    [params.challenger, params.opponent],
-    sandboxParityRequiredByDefault()
-  );
-
-  if (!parity.passed) {
-    throw new Error(`sandbox_parity_mismatch:${parity.reason || 'unknown'}`);
+  if (params.fairnessAudit.sandboxParityEnforced && !params.fairnessAudit.sandboxParityPassed) {
+    throw new Error(`sandbox_parity_mismatch:${params.fairnessAudit.rejectionReason || 'unknown'}`);
   }
 
-  const matchId = `match_${Date.now()}`;
+  if (params.fairnessAudit.endpointExecutionRequired && !params.fairnessAudit.endpointExecutionPassed) {
+    throw new Error(`endpoint_execution_required:${params.fairnessAudit.rejectionReason || 'unknown'}`);
+  }
+
+  if (params.fairnessAudit.eigenComputeEnforced && !params.fairnessAudit.eigenComputePassed) {
+    throw new Error(`eigencompute_policy_failed:${params.fairnessAudit.rejectionReason || 'unknown'}`);
+  }
+
   const match = await runMatch({
-    id: matchId,
+    id: params.matchId,
     agents: [
       {
         id: params.challenger.id,
@@ -209,56 +221,219 @@ async function runChallengeMatch(params: {
       }
     ],
     config: params.config,
-    fairness: {
-      sandboxParityRequired: parity.required,
-      sandboxParityEnforced: parity.enforced,
-      sandboxParityPassed: parity.passed,
-      sandboxProfiles: parity.profiles,
-      rejectionReason: parity.reason
-    }
+    fairness: params.fairnessAudit
   });
 
   store.saveMatch(match);
-  return { match, parity };
+  return { match };
 }
 
-async function maybeCreateChallengeEscrow(challenge: ReturnType<typeof store.getChallenge>, matchId: string) {
-  if (!challenge || challenge.stake.mode !== 'usdc') {
-    return { txHash: null as string | null, error: null as string | null };
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+
+type EscrowOnchainStatus = Awaited<ReturnType<typeof getEscrowMatchStatus>>;
+
+type EscrowPrepareResult = {
+  ok: boolean;
+  challenge: NonNullable<ReturnType<typeof store.getChallenge>>;
+  matchId: string;
+  matchIdHex: string;
+  txHash: string | null;
+  created: boolean;
+  depositsReady: boolean;
+  status: EscrowOnchainStatus | null;
+  error: string | null;
+};
+
+function normalizeAddress(value: string | undefined | null): string {
+  return (value || '').trim().toLowerCase();
+}
+
+function isZeroAddress(value: string | undefined | null): boolean {
+  return normalizeAddress(value) === ZERO_ADDRESS;
+}
+
+function nextMatchIdForChallenge(challengeId: string): string {
+  const now = Date.now();
+  const suffix = stableHash(`${challengeId}:${now}`).slice(0, 6);
+  return `match_${now}_${suffix}`;
+}
+
+function ensureChallengeMatchId(challengeId: string, challenge: NonNullable<ReturnType<typeof store.getChallenge>>) {
+  if (challenge.matchId) {
+    return {
+      challenge,
+      matchId: challenge.matchId
+    };
+  }
+
+  const matchId = nextMatchIdForChallenge(challengeId);
+  const updated = store.patchChallenge(challengeId, { matchId });
+
+  return {
+    challenge: updated ?? {
+      ...challenge,
+      matchId
+    },
+    matchId
+  };
+}
+
+async function prepareChallengeEscrow(challengeId: string, challenge: NonNullable<ReturnType<typeof store.getChallenge>>): Promise<EscrowPrepareResult> {
+  const { challenge: withMatchId, matchId } = ensureChallengeMatchId(challengeId, challenge);
+  const matchIdHex = toMatchIdHex(matchId);
+
+  if (withMatchId.stake.mode !== 'usdc') {
+    return {
+      ok: false,
+      challenge: withMatchId,
+      matchId,
+      matchIdHex,
+      txHash: null,
+      created: false,
+      depositsReady: false,
+      status: null,
+      error: 'stake_mode_not_usdc'
+    };
   }
 
   const signerKey = process.env.PAYOUT_SIGNER_PRIVATE_KEY || process.env.OPERATOR_PRIVATE_KEY;
-  const { contractAddress, playerA, playerB, amountPerPlayer } = challenge.stake;
+  const { contractAddress, playerA, playerB, amountPerPlayer } = withMatchId.stake;
 
   if (!contractAddress || !playerA || !playerB || !amountPerPlayer) {
-    return { txHash: null, error: 'missing_usdc_stake_fields' };
+    return {
+      ok: false,
+      challenge: withMatchId,
+      matchId,
+      matchIdHex,
+      txHash: null,
+      created: false,
+      depositsReady: false,
+      status: null,
+      error: 'missing_usdc_stake_fields'
+    };
   }
 
   if (!process.env.SEPOLIA_RPC_URL || !signerKey) {
-    return { txHash: null, error: 'missing_chain_config' };
-  }
-
-  try {
-    const receipt = await createEscrowMatch({
-      rpcUrl: process.env.SEPOLIA_RPC_URL,
-      privateKey: signerKey,
-      contractAddress,
-      matchIdHex: toMatchIdHex(matchId),
-      playerA,
-      playerB,
-      amountPerPlayer
-    });
-
     return {
-      txHash: receipt?.hash ?? null,
-      error: null
-    };
-  } catch (error) {
-    return {
+      ok: false,
+      challenge: withMatchId,
+      matchId,
+      matchIdHex,
       txHash: null,
-      error: error instanceof Error ? error.message : 'escrow_create_failed'
+      created: false,
+      depositsReady: false,
+      status: null,
+      error: 'missing_chain_config'
     };
   }
+
+  let status: EscrowOnchainStatus | null = null;
+  try {
+    status = await getEscrowMatchStatus({
+      rpcUrl: process.env.SEPOLIA_RPC_URL,
+      contractAddress,
+      matchIdHex
+    });
+  } catch {
+    status = null;
+  }
+
+  let txHash: string | null = null;
+  const hasEscrow = status && !isZeroAddress(status.playerA) && !isZeroAddress(status.playerB) && status.amountPerPlayer !== '0';
+
+  if (!hasEscrow) {
+    try {
+      const receipt = await createEscrowMatch({
+        rpcUrl: process.env.SEPOLIA_RPC_URL,
+        privateKey: signerKey,
+        contractAddress,
+        matchIdHex,
+        playerA,
+        playerB,
+        amountPerPlayer
+      });
+      txHash = receipt?.hash ?? null;
+    } catch (error) {
+      return {
+        ok: false,
+        challenge: withMatchId,
+        matchId,
+        matchIdHex,
+        txHash: null,
+        created: false,
+        depositsReady: false,
+        status,
+        error: error instanceof Error ? error.message : 'escrow_create_failed'
+      };
+    }
+
+    try {
+      status = await getEscrowMatchStatus({
+        rpcUrl: process.env.SEPOLIA_RPC_URL,
+        contractAddress,
+        matchIdHex
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        challenge: withMatchId,
+        matchId,
+        matchIdHex,
+        txHash,
+        created: true,
+        depositsReady: false,
+        status: null,
+        error: error instanceof Error ? error.message : 'escrow_status_unavailable'
+      };
+    }
+  }
+
+  if (!status || isZeroAddress(status.playerA) || isZeroAddress(status.playerB) || status.amountPerPlayer === '0') {
+    return {
+      ok: false,
+      challenge: withMatchId,
+      matchId,
+      matchIdHex,
+      txHash,
+      created: Boolean(txHash),
+      depositsReady: false,
+      status,
+      error: 'escrow_uninitialized'
+    };
+  }
+
+  const mismatches: string[] = [];
+  if (normalizeAddress(status.playerA) !== normalizeAddress(playerA)) mismatches.push('playerA');
+  if (normalizeAddress(status.playerB) !== normalizeAddress(playerB)) mismatches.push('playerB');
+  if (String(status.amountPerPlayer) !== String(amountPerPlayer)) mismatches.push('amountPerPlayer');
+
+  if (mismatches.length > 0) {
+    return {
+      ok: false,
+      challenge: withMatchId,
+      matchId,
+      matchIdHex,
+      txHash,
+      created: Boolean(txHash),
+      depositsReady: false,
+      status,
+      error: `escrow_profile_mismatch:${mismatches.join(',')}`
+    };
+  }
+
+  const depositsReady = status.playerADeposited && status.playerBDeposited;
+
+  return {
+    ok: true,
+    challenge: withMatchId,
+    matchId,
+    matchIdHex,
+    txHash,
+    created: Boolean(txHash),
+    depositsReady,
+    status,
+    error: null
+  };
 }
 
 async function finalizeChallengeFromMatch(params: {
@@ -460,6 +635,71 @@ export async function challengeRoutes(app: FastifyInstance) {
     return { ok: true, challenge: updated };
   });
 
+  app.post('/challenges/:id/escrow/prepare', async (req, reply) => {
+    if (!requireRole(req, reply, 'agent')) return;
+
+    const id = (req.params as { id: string }).id;
+    const challenge = store.getChallenge(id);
+    if (!challenge) return reply.code(404).send({ error: 'not_found' });
+
+    if (challenge.status === 'completed' || challenge.status === 'cancelled') {
+      return reply.code(400).send({
+        error: 'invalid_status',
+        status: challenge.status,
+        message: 'Escrow preparation is only available before challenge completion/cancellation.'
+      });
+    }
+
+    if (challenge.stake.mode !== 'usdc') {
+      return reply.code(400).send({
+        error: 'stake_mode_not_usdc',
+        message: 'Escrow preparation is only valid for stake.mode="usdc" challenges.'
+      });
+    }
+
+    const actorAgentId = resolveActorAgentId(req);
+    const participants = [challenge.challengerAgentId, challenge.opponentAgentId].filter((value): value is string => Boolean(value));
+    if (actorAgentId && !participants.includes(actorAgentId)) {
+      return reply.code(403).send({
+        error: 'forbidden_actor',
+        actorAgentId,
+        message: 'Agent API key can only prepare escrow for challenges where the authenticated agent is a participant.'
+      });
+    }
+
+    const escrow = await prepareChallengeEscrow(id, challenge);
+    if (!escrow.ok) {
+      return reply.code(400).send({
+        error: 'escrow_prepare_failed',
+        reason: escrow.error,
+        challenge: escrow.challenge,
+        escrow: {
+          mode: 'usdc',
+          matchId: escrow.matchId,
+          matchIdHex: escrow.matchIdHex,
+          txHash: escrow.txHash,
+          created: escrow.created,
+          status: escrow.status,
+          readyToStart: false
+        }
+      });
+    }
+
+    return {
+      ok: true,
+      challenge: escrow.challenge,
+      escrow: {
+        mode: 'usdc',
+        matchId: escrow.matchId,
+        matchIdHex: escrow.matchIdHex,
+        txHash: escrow.txHash,
+        created: escrow.created,
+        status: escrow.status,
+        readyToStart: escrow.depositsReady
+      }
+    };
+  });
+
   app.post('/challenges/:id/start', async (req, reply) => {
     if (!requireRole(req, reply, 'agent')) return;
 
@@ -515,10 +755,87 @@ export async function challengeRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'invalid_or_disabled_agents' });
     }
 
-    const simpleMode = shouldUseSimpleMode(challenger, opponent);
+    const simpleModeRequested = shouldUseSimpleMode(challenger, opponent);
+    if (simpleModeRequested && !simpleModeEnabledByDefault()) {
+      return reply.code(400).send({
+        error: 'endpoint_execution_required',
+        message: 'Simple mode is disabled. Run endpoint agents in strict sandbox mode.'
+      });
+    }
 
-    if (simpleMode) {
-      const existingMatch = challenge.matchId ? store.getMatch(challenge.matchId) : undefined;
+    const executionMode = simpleModeRequested ? 'simple' : 'endpoint';
+    const strictPolicy = evaluateStrictSandboxPolicy({
+      agents: [challenger, opponent],
+      executionMode,
+      endpointModeRequired: endpointExecutionRequiredByDefault()
+    });
+    const fairnessAudit = toMatchFairnessAudit(strictPolicy);
+
+    if (!strictPolicy.passed) {
+      return reply.code(400).send({
+        error: 'strict_sandbox_policy_failed',
+        reason: strictPolicy.reason,
+        strictPolicy: {
+          executionMode: strictPolicy.executionMode,
+          endpointModeRequired: strictPolicy.endpointModeRequired,
+          endpointModePassed: strictPolicy.endpointModePassed,
+          parity: strictPolicy.parity,
+          eigenCompute: strictPolicy.eigenCompute
+        }
+      });
+    }
+
+    let challengeForStart = challenge;
+    let escrowPreflight: EscrowPrepareResult | null = null;
+
+    if (challenge.stake.mode === 'usdc') {
+      escrowPreflight = await prepareChallengeEscrow(id, challenge);
+      challengeForStart = escrowPreflight.challenge;
+
+      if (!escrowPreflight.ok) {
+        return reply.code(400).send({
+          error: 'escrow_prepare_failed',
+          reason: escrowPreflight.error,
+          message: 'Failed to prepare USDC escrow match before challenge start.',
+          challenge: challengeForStart,
+          escrow: {
+            mode: 'usdc',
+            matchId: escrowPreflight.matchId,
+            matchIdHex: escrowPreflight.matchIdHex,
+            txHash: escrowPreflight.txHash,
+            created: escrowPreflight.created,
+            status: escrowPreflight.status,
+            readyToStart: false
+          }
+        });
+      }
+
+      if (!escrowPreflight.depositsReady) {
+        const reverted = store.patchChallenge(id, {
+          status: 'accepted',
+          opponentAgentId,
+          matchId: escrowPreflight.matchId
+        });
+
+        return reply.code(409).send({
+          error: 'escrow_pending_deposits',
+          message: 'USDC deposits must be completed before challenge start.',
+          challenge: reverted ?? challengeForStart,
+          escrow: {
+            mode: 'usdc',
+            matchId: escrowPreflight.matchId,
+            matchIdHex: escrowPreflight.matchIdHex,
+            txHash: escrowPreflight.txHash,
+            created: escrowPreflight.created,
+            status: escrowPreflight.status,
+            readyToStart: false
+          }
+        });
+      }
+    }
+
+    if (executionMode === 'simple') {
+      const existingMatch = challengeForStart.matchId ? store.getMatch(challengeForStart.matchId) : undefined;
 
       if (existingMatch && existingMatch.status === 'running') {
         const [stateA, stateB] = currentStatesFromMatch(existingMatch);
@@ -528,7 +845,7 @@ export async function challengeRoutes(app: FastifyInstance) {
         return {
           ok: true,
           mode: 'simple',
-          challenge,
+          challenge: challengeForStart,
           match: {
             ...existingMatch,
             matchIdHex: toMatchIdHex(existingMatch.id)
@@ -536,14 +853,14 @@ export async function challengeRoutes(app: FastifyInstance) {
           round: {
             turn: pendingTurn,
             submittedBy: pendingSubmissions.map((item) => item.agentId),
-            awaiting: [challenge.challengerAgentId, opponentAgentId].filter((agentId) => !pendingSubmissions.some((item) => item.agentId === agentId))
+            awaiting: [challengeForStart.challengerAgentId, opponentAgentId].filter((agentId) => !pendingSubmissions.some((item) => item.agentId === agentId))
           },
           states: [stateA, stateB],
           message: 'Simple mode running. Submit actions with /challenges/:id/rounds/:turn/submit.'
         };
       }
 
-      const matchId = challenge.matchId || `match_${Date.now()}`;
+      const matchId = challengeForStart.matchId || nextMatchIdForChallenge(id);
       const manualMatch: MatchRecord = {
         id: matchId,
         status: 'running',
@@ -566,8 +883,8 @@ export async function challengeRoutes(app: FastifyInstance) {
           }
         ],
         replay: [],
-        config: challenge.config,
-        audit: defaultManualAudit()
+        config: challengeForStart.config,
+        audit: defaultManualAudit(fairnessAudit)
       };
 
       store.saveMatch(manualMatch);
@@ -588,19 +905,11 @@ export async function challengeRoutes(app: FastifyInstance) {
         round: {
           turn: 1,
           submittedBy: [],
-          awaiting: [challenge.challengerAgentId, opponentAgentId]
+          awaiting: [challengeForStart.challengerAgentId, opponentAgentId]
         },
-        states: [initialState(challenge.challengerAgentId), initialState(opponentAgentId)],
+        states: [initialState(challengeForStart.challengerAgentId), initialState(opponentAgentId)],
         message: 'Simple mode started. Submit actions with /challenges/:id/rounds/:turn/submit.'
       };
-    }
-
-    const parity = checkSandboxParity([challenger, opponent], sandboxParityRequiredByDefault());
-    if (!parity.passed) {
-      return reply.code(400).send({
-        error: 'sandbox_parity_mismatch',
-        parity
-      });
     }
 
     const [challengerHealth, opponentHealth] = await Promise.all([
@@ -628,26 +937,28 @@ export async function challengeRoutes(app: FastifyInstance) {
       });
     }
 
-    store.patchChallenge(id, { status: 'running', opponentAgentId });
+    const matchId = challengeForStart.matchId || nextMatchIdForChallenge(id);
+    store.patchChallenge(id, { status: 'running', opponentAgentId, matchId });
 
     try {
       const { match } = await runChallengeMatch({
         challenger,
         opponent,
-        config: challenge.config
+        config: challengeForStart.config,
+        fairnessAudit,
+        matchId
       });
 
-      const escrow = await maybeCreateChallengeEscrow(challenge, match.id);
       return finalizeChallengeFromMatch({
         challengeId: id,
-        challenge,
+        challenge: challengeForStart,
         opponentAgentId,
         match,
-        escrowTxHash: escrow.txHash,
-        escrowError: escrow.error
+        escrowTxHash: escrowPreflight?.txHash ?? null,
+        escrowError: escrowPreflight?.error ?? null
       });
     } catch (error) {
-      store.patchChallenge(id, { status: 'accepted', opponentAgentId });
+      store.patchChallenge(id, { status: 'accepted', opponentAgentId, matchId });
       return reply.code(500).send({
         error: 'challenge_start_failed',
         message: error instanceof Error ? error.message : 'unknown_error'
@@ -850,6 +1161,13 @@ export async function challengeRoutes(app: FastifyInstance) {
     const match = store.getMatch(challenge.matchId);
     if (!match) return reply.code(404).send({ error: 'match_not_found' });
 
+    if (match.audit?.fairness?.executionMode !== 'simple') {
+      return reply.code(400).send({
+        error: 'endpoint_execution_match',
+        message: 'Round submit is only available for simple-mode matches.'
+      });
+    }
+
     if (match.status !== 'running') {
       return reply.code(400).send({ error: 'invalid_match_status', status: match.status, message: 'Match is not running' });
     }
@@ -928,9 +1246,7 @@ export async function challengeRoutes(app: FastifyInstance) {
 
       store.saveMatch(updatedMatch);
 
-      const escrow = turn === 1 && match.turnsPlayed === 0
-        ? await maybeCreateChallengeEscrow(challenge, updatedMatch.id)
-        : { txHash: null, error: null };
+      const escrow = { txHash: null as string | null, error: null as string | null };
 
       if (matchOver) {
         return reply.send(await finalizeChallengeFromMatch({

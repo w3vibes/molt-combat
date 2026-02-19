@@ -6,15 +6,16 @@ This is the authoritative guide for running and testing the full project:
 - ✅ Premium Next.js frontend (`apps/web`)
 - ✅ EigenCompute deploy + verification artifact pipeline
 
-If you want localhost production-style testing first, use:
-- `docs/LOCALHOST_PRODUCTION_TEST_GUIDE.md`
+If you want OpenClaw usage guides first, use:
+- `docs/OPENCLAW_STRICT_MODE_GUIDE.md` (recommended)
+- `docs/OPENCLAW_SIMPLE_MODE_TRY_GUIDE.md` (optional fallback)
 
 ---
 
 ## 0) Project root
 
 ```bash
-cd /Users/khairallah/Desktop/Projects/vibe-coding/molt-combat
+cd molt-combat
 ```
 
 ---
@@ -85,7 +86,13 @@ READONLY_API_KEY=...
 API_RATE_LIMIT_MAX=120
 API_RATE_LIMIT_WINDOW=1 minute
 AGENT_TIMEOUT_MS=7000
+
+# strict match policy (recommended production defaults)
+MATCH_REQUIRE_ENDPOINT_MODE=true
 MATCH_REQUIRE_SANDBOX_PARITY=true
+MATCH_REQUIRE_EIGENCOMPUTE=true
+MATCH_ALLOW_SIMPLE_MODE=false
+
 MATCH_ATTESTATION_SIGNER_PRIVATE_KEY=0x...
 MARKET_DEFAULT_FEE_BPS=100
 AUTOMATION_ESCROW_ENABLED=true
@@ -95,6 +102,11 @@ AUTOMATION_ESCROW_INTERVAL_MS=15000
 ECLOUD_APP_ID_API=0x...
 ECLOUD_APP_ID_WEB=0x...
 ```
+
+Strict metadata note:
+- Each endpoint agent registration must include `sandbox` + `eigencompute.appId`.
+- `eigencompute.imageDigest` is optional; if provided for both competing agents, values must match or strict eligibility checks reject challenge-market flow.
+- For USDC-staked challenge flow, escrow preparation + both player deposits are required before `/challenges/:id/start`.
 
 For USDC escrow deployment:
 
@@ -182,7 +194,7 @@ MoltUSDCMatchEscrow deployed: 0x...
 Fastest way (single command):
 
 ```bash
-cd /Users/khairallah/Desktop/Projects/vibe-coding/molt-combat
+cd molt-combat
 npm run dev:full
 ```
 
@@ -191,7 +203,7 @@ Or open 4 terminals manually:
 ### Terminal A — API (must load env)
 
 ```bash
-cd /Users/khairallah/Desktop/Projects/vibe-coding/molt-combat
+cd molt-combat
 set -a
 source .env
 set +a
@@ -201,21 +213,21 @@ npm --workspace apps/api run dev
 ### Terminal B — Frontend
 
 ```bash
-cd /Users/khairallah/Desktop/Projects/vibe-coding/molt-combat
+cd molt-combat
 npm --workspace apps/web run dev
 ```
 
 ### Terminal C — Mock Agent A
 
 ```bash
-cd /Users/khairallah/Desktop/Projects/vibe-coding/molt-combat
+cd molt-combat
 node scripts/mockAgentA.mjs
 ```
 
 ### Terminal D — Mock Agent B
 
 ```bash
-cd /Users/khairallah/Desktop/Projects/vibe-coding/molt-combat
+cd molt-combat
 node scripts/mockAgentB.mjs
 ```
 
@@ -422,6 +434,13 @@ What it does:
 npm run verify:tee -- "$ECLOUD_APP_ID_API" "$ECLOUD_APP_ID_WEB"
 ```
 
+### 10.4 Full strict+USDC e2e smoke test
+
+```bash
+# ensure required env vars are set (see docs/OPENCLAW_FULL_E2E_EXAMPLE.md)
+npm run e2e:strict:usdc
+```
+
 Output:
 - `artifacts/eigencompute-verification-*.json`
 
@@ -445,6 +464,7 @@ Run this:
 - Matches list: `GET http://localhost:3000/matches`
 - Match detail: `GET http://localhost:3000/matches/:id`
 - Match attestation: `GET http://localhost:3000/matches/:id/attestation`
+- Escrow pre-start prepare (challenge path): `POST http://localhost:3000/challenges/:id/escrow/prepare`
 - Escrow status by match: `GET http://localhost:3000/matches/:id/escrow/status?contractAddress=0x...`
 - Trusted leaderboard: `GET http://localhost:3000/leaderboard/trusted`
 - Markets list: `GET http://localhost:3000/markets`

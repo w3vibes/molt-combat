@@ -7,7 +7,12 @@ import { fundOnSepolia, payoutOnSepolia } from '../services/payout.js';
 import { createEscrowMatch, getEscrowMatchStatus, settleEscrowMatch } from '../services/escrow.js';
 import { signMatchAttestation, verifyMatchAttestation } from '../services/attestation.js';
 import { autoResolveMarketsForMatch } from '../services/markets.js';
-import { checkSandboxParity, sandboxParityRequiredByDefault } from '../services/fairness.js';
+import {
+  endpointExecutionRequiredByDefault,
+  evaluateStrictSandboxPolicy,
+  sandboxParityRequiredByDefault,
+  toMatchFairnessAudit
+} from '../services/fairness.js';
 import { RegisteredAgent, store } from '../services/store.js';
 import { MatchFairnessAudit } from '../types/domain.js';
 
@@ -150,32 +155,34 @@ export async function matchRoutes(app: FastifyInstance) {
       });
     }
 
-    let fairness: MatchFairnessAudit = {
-      sandboxParityRequired: false,
-      sandboxParityEnforced: false,
-      sandboxParityPassed: true,
-      sandboxProfiles: undefined,
-      rejectionReason: undefined
-    };
+    if (!resolved.registryAgents) {
+      return reply.code(400).send({
+        error: 'registry_agents_required',
+        message: 'Strict sandbox mode requires registered agentIds with sandbox + EigenCompute metadata.'
+      });
+    }
 
-    if (resolved.registryAgents) {
-      const requireParity = parsed.fairness?.requireSandboxParity ?? sandboxParityRequiredByDefault();
-      const parity = checkSandboxParity(resolved.registryAgents, requireParity);
+    const strictPolicy = evaluateStrictSandboxPolicy({
+      agents: resolved.registryAgents,
+      executionMode: 'endpoint',
+      requireParity: sandboxParityRequiredByDefault(),
+      endpointModeRequired: endpointExecutionRequiredByDefault()
+    });
 
-      fairness = {
-        sandboxParityRequired: parity.required,
-        sandboxParityEnforced: parity.enforced,
-        sandboxParityPassed: parity.passed,
-        sandboxProfiles: parity.profiles,
-        rejectionReason: parity.reason
-      };
+    const fairness: MatchFairnessAudit = toMatchFairnessAudit(strictPolicy);
 
-      if (!parity.passed) {
-        return reply.code(400).send({
-          error: 'sandbox_parity_mismatch',
-          parity
-        });
-      }
+    if (!strictPolicy.passed) {
+      return reply.code(400).send({
+        error: 'strict_sandbox_policy_failed',
+        reason: strictPolicy.reason,
+        strictPolicy: {
+          executionMode: strictPolicy.executionMode,
+          endpointModeRequired: strictPolicy.endpointModeRequired,
+          endpointModePassed: strictPolicy.endpointModePassed,
+          parity: strictPolicy.parity,
+          eigenCompute: strictPolicy.eigenCompute
+        }
+      });
     }
 
     const id = `match_${Date.now()}`;
@@ -366,7 +373,13 @@ export async function matchRoutes(app: FastifyInstance) {
         signerLoaded: Boolean(process.env.PAYOUT_SIGNER_PRIVATE_KEY || process.env.OPERATOR_PRIVATE_KEY),
         attestationSignerLoaded: Boolean(process.env.MATCH_ATTESTATION_SIGNER_PRIVATE_KEY || process.env.PAYOUT_SIGNER_PRIVATE_KEY || process.env.OPERATOR_PRIVATE_KEY),
         appBound: appIds.length > 0,
-        contractsBound: Boolean(process.env.MOLT_PRIZE_POOL_ADDRESS)
+        contractsBound: Boolean(process.env.MOLT_PRIZE_POOL_ADDRESS),
+        strictMode: {
+          requireEndpointMode: endpointExecutionRequiredByDefault(),
+          requireSandboxParity: sandboxParityRequiredByDefault(),
+          requireEigenCompute: process.env.MATCH_REQUIRE_EIGENCOMPUTE !== 'false',
+          allowSimpleMode: process.env.MATCH_ALLOW_SIMPLE_MODE === 'true'
+        }
       }
     };
   });

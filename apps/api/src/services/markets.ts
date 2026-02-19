@@ -1,4 +1,6 @@
 import { BettingMarketRecord, MarketPayout, MarketPositionRecord } from '../types/domain.js';
+import { verifyMatchAttestation } from './attestation.js';
+import { isStrictSandboxMatch } from './fairness.js';
 import { store } from './store.js';
 
 export type MarketResolutionResult = {
@@ -122,6 +124,20 @@ export function resolveMarketByOutcome(params: { marketId: string; winningOutcom
   };
 }
 
+function isStrictAttestedMatch(matchId: string): { ok: boolean; reason?: string } {
+  const match = store.getMatch(matchId);
+  if (!match) return { ok: false, reason: 'match_not_found' };
+  if (!isStrictSandboxMatch(match)) return { ok: false, reason: 'strict_sandbox_unverified' };
+
+  const attestation = store.getMatchAttestation(matchId);
+  if (!attestation) return { ok: false, reason: 'attestation_not_found' };
+
+  const verification = verifyMatchAttestation(attestation, match);
+  if (!verification.valid) return { ok: false, reason: verification.reason || 'attestation_invalid' };
+
+  return { ok: true };
+}
+
 export function autoResolveMarketsForMatch(params: {
   matchId: string;
   winnerAgentId?: string;
@@ -142,10 +158,17 @@ export function autoResolveMarketsForMatch(params: {
       : [])
   ];
 
+  const strictCheck = isStrictAttestedMatch(params.matchId);
+
   const skipped: Array<{ marketId: string; reason: string }> = [];
   let resolved = 0;
 
   for (const market of targets) {
+    if (!strictCheck.ok) {
+      skipped.push({ marketId: market.id, reason: strictCheck.reason || 'strict_match_required' });
+      continue;
+    }
+
     if (!market.outcomes.includes(params.winnerAgentId)) {
       skipped.push({ marketId: market.id, reason: 'winner_not_in_outcomes' });
       continue;

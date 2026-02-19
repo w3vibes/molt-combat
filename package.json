@@ -18,7 +18,9 @@
     "escrow:player:deposit": "node scripts/playerDepositEscrow.mjs",
     "escrow:status": "node scripts/escrowStatus.mjs",
     "deploy:first": "bash scripts/prod-first-deploy.sh",
-    "release:prod": "bash scripts/prod-release.sh"
+    "release:prod": "bash scripts/prod-release.sh",
+    "deploy:agents": "bash scripts/deploy-agents.sh",
+    "e2e:strict:usdc": "bash scripts/strict-usdc-e2e.sh"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",

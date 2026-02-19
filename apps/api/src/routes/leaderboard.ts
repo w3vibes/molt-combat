@@ -1,6 +1,7 @@
 import { FastifyInstance } from 'fastify';
 import { requireRole } from '../services/access.js';
 import { verifyMatchAttestation } from '../services/attestation.js';
+import { isStrictSandboxMatch } from '../services/fairness.js';
 import { store } from '../services/store.js';
 
 export async function leaderboardRoutes(app: FastifyInstance) {
@@ -24,6 +25,7 @@ export async function leaderboardRoutes(app: FastifyInstance) {
       const attestation = attestations.get(match.id);
       if (!attestation) return false;
       if (!match.winner) return false;
+      if (!isStrictSandboxMatch(match)) return false;
       return verifyMatchAttestation(attestation, match).valid;
     });
 
@@ -77,6 +79,7 @@ export async function leaderboardRoutes(app: FastifyInstance) {
 
     return {
       ok: true,
+      strictOnly: true,
       trustedMatchCount: trustedMatches.length,
       evaluatedMatchCount: allMatches.length,
       leaderboard,

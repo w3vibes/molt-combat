@@ -1,6 +1,13 @@
 import { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { requireRole } from '../services/access.js';
+import { verifyMatchAttestation } from '../services/attestation.js';
+import {
+  endpointExecutionRequiredByDefault,
+  evaluateStrictSandboxPolicy,
+  isStrictSandboxMatch,
+  resolveAgentExecutionMode
+} from '../services/fairness.js';
 import { assertMarketBetInput, resolveMarketByOutcome } from '../services/markets.js';
 import { store } from '../services/store.js';
 
@@ -17,6 +24,52 @@ function defaultMarketFeeBps(): number {
   const raw = Number(process.env.MARKET_DEFAULT_FEE_BPS || 0);
   if (!Number.isFinite(raw) || raw < 0) return 0;
   return Math.min(Math.floor(raw), 2000);
+}
+
+function isMatchTrustedStrict(matchId: string): { ok: boolean; reason?: string } {
+  const match = store.getMatch(matchId);
+  if (!match) return { ok: false, reason: 'match_not_found' };
+  if (!isStrictSandboxMatch(match)) return { ok: false, reason: 'strict_sandbox_unverified' };
+
+  const attestation = store.getMatchAttestation(matchId);
+  if (!attestation) return { ok: false, reason: 'attestation_not_found' };
+
+  const verification = verifyMatchAttestation(attestation, match);
+  if (!verification.valid) return { ok: false, reason: verification.reason || 'attestation_invalid' };
+
+  return { ok: true };
+}
+
+function validateChallengeStrictEligibility(challengeId: string): { ok: boolean; reason?: string } {
+  const challenge = store.getChallenge(challengeId);
+  if (!challenge) return { ok: false, reason: 'challenge_not_found' };
+
+  if (!challenge.opponentAgentId) {
+    return { ok: false, reason: 'challenge_requires_fixed_opponent' };
+  }
+
+  const challenger = store.getAgent(challenge.challengerAgentId);
+  const opponent = store.getAgent(challenge.opponentAgentId);
+  if (!challenger || !challenger.enabled || !opponent || !opponent.enabled) {
+    return { ok: false, reason: 'challenge_agents_invalid' };
+  }
+
+  const executionMode =
+    resolveAgentExecutionMode(challenger) === 'simple' || resolveAgentExecutionMode(opponent) === 'simple'
+      ? 'simple'
+      : 'endpoint';
+
+  const policy = evaluateStrictSandboxPolicy({
+    agents: [challenger, opponent],
+    executionMode,
+    endpointModeRequired: endpointExecutionRequiredByDefault()
+  });
+
+  if (!policy.passed) {
+    return { ok: false, reason: policy.reason || 'strict_policy_failed' };
+  }
+
+  return { ok: true };
 }
 
 export async function marketRoutes(app: FastifyInstance) {
@@ -72,6 +125,28 @@ export async function marketRoutes(app: FastifyInstance) {
     const outcomes = [...new Set(body.outcomes.map((outcome) => outcome.trim()))].filter(Boolean);
     if (outcomes.length < 2) {
       return reply.code(400).send({ error: 'invalid_outcomes', message: 'At least two unique outcomes are required.' });
+    }
+
+    if (body.subjectType === 'match') {
+      const strict = isMatchTrustedStrict(body.subjectId);
+      if (!strict.ok) {
+        return reply.code(400).send({
+          error: 'strict_market_subject_required',
+          reason: strict.reason,
+          message: 'Built-in betting is restricted to strict, attested sandbox matches.'
+        });
+      }
+    }
+
+    if (body.subjectType === 'challenge') {
+      const strict = validateChallengeStrictEligibility(body.subjectId);
+      if (!strict.ok) {
+        return reply.code(400).send({
+          error: 'strict_market_subject_required',
+          reason: strict.reason,
+          message: 'Challenge market requires endpoint-only strict sandbox eligibility.'
+        });
+      }
     }
 
     const market = store.createMarket({

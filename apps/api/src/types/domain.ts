@@ -7,6 +7,12 @@ export type SandboxProfile = {
   memory: number;
 };
 
+export type EigenComputeProfile = {
+  appId: string;
+  environment?: string;
+  imageDigest?: string;
+};
+
 export type AgentProfile = {
   id: string;
   name: string;
@@ -34,6 +40,8 @@ export type MatchConfig = {
   attackCost: number;
   attackDamage: number;
 };
+
+export type MatchExecutionMode = 'endpoint' | 'simple';
 
 export type MatchTurnEnforcement = {
   timeout: boolean;
@@ -67,6 +75,14 @@ export type MatchFairnessAudit = {
   sandboxParityEnforced: boolean;
   sandboxParityPassed: boolean;
   sandboxProfiles?: Record<string, SandboxProfile>;
+  executionMode?: MatchExecutionMode;
+  endpointExecutionRequired?: boolean;
+  endpointExecutionPassed?: boolean;
+  eigenComputeRequired?: boolean;
+  eigenComputeEnforced?: boolean;
+  eigenComputePassed?: boolean;
+  eigenComputeProfiles?: Record<string, EigenComputeProfile>;
+  strictVerified?: boolean;
   rejectionReason?: string;
 };
 
@@ -105,6 +121,8 @@ export type MatchAttestationPayload = {
   replayHash: string;
   auditHash: string;
   agentIds: string[];
+  executionMode: MatchExecutionMode | 'unknown';
+  strictVerified: boolean;
 };
 
 export type MatchAttestationRecord = {
