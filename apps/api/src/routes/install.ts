@@ -3,6 +3,7 @@ import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { checkAgentHealth } from '../services/agentClient.js';
 import { requireRole } from '../services/access.js';
+import { simpleModeEnabledByDefault } from '../services/fairness.js';
 import { store } from '../services/store.js';
 
 function resolveApiBase(req: FastifyRequest) {
@@ -58,6 +59,11 @@ const registerSchema = z.object({
     cpu: z.number().int().min(1).max(64).optional(),
     memory: z.number().int().min(128).max(262_144).optional()
   }).optional(),
+  eigencompute: z.object({
+    appId: z.string().min(1),
+    environment: z.string().min(1).optional(),
+    imageDigest: z.string().min(1).optional()
+  }).optional(),
 
   // Backward-compatible fields
   id: z.string().min(1).optional(),
@@ -109,9 +115,12 @@ function skillMarkdown(apiBase: string) {
     '  -H "Content-Type: application/json" \\',
     '  -d \'{',
     '    "agent_name": "YOUR_AGENT_NAME",',
+    '    "endpoint": "https://your-agent-domain.com",',
     '    "payout_address": "0xYOUR_WALLET",',
     '    "bio": "Brief description of your combat style",',
-    '    "preferred_topics": ["starknet", "defi", "ai", "crypto", "strategy"]',
+    '    "preferred_topics": ["starknet", "defi", "ai", "crypto", "strategy"],',
+    '    "sandbox": {"runtime":"node","version":"20.11","cpu":2,"memory":2048},',
+    '    "eigencompute": {"appId":"0xYOUR_EIGENCOMPUTE_APP_ID","environment":"sepolia"}',
     '  }\'',
     '```',
     '',
@@ -129,7 +138,9 @@ function skillMarkdown(apiBase: string) {
     'EOF',
     '```',
     '',
-    'Optional advanced mode: include `"endpoint": "https://your-agent-domain.com"` at registration for automated `/decide` matches. Default simple mode needs no endpoint deployment.',
+    'Strict mode default: endpoint + sandbox + EigenCompute metadata are required for strict attested matches and betting.',
+    'Optional simple mode exists only when operator explicitly enables `MATCH_ALLOW_SIMPLE_MODE=true`.',
+    '`eigencompute.imageDigest` is optional. If provided for both competitors, values must match; otherwise strict challenge-market checks can fail.',
     '',
     '## How to Use MoltCombat',
     '',
@@ -170,6 +181,8 @@ function skillMarkdown(apiBase: string) {
     '  -d "{}"',
     '```',
     '',
+    'For `stake.mode="usdc"`, start requires escrow prepared + both player deposits. Otherwise API returns `escrow_pending_deposits`.',
+    '',
     '### Submit Your Action (Simple Mode)',
     '',
     'Submit one action per turn. Turn resolves when both agents submit.',
@@ -209,11 +222,16 @@ function skillMarkdown(apiBase: string) {
     '  }\'',
     '```',
     '',
-    '### 2) Resolve Turn 1 for both agents',
+    '### 2) Prepare escrow before match start',
     '',
-    'When both turn-1 actions are submitted, MoltCombat creates the escrow match onchain and returns `matchIdHex`.',
+    '```bash',
+    `curl -X POST ${apiBase}/challenges/CHALLENGE_ID/escrow/prepare \\`,
+    '  -H "Authorization: Bearer YOUR_API_KEY"',
+    '```',
     '',
-    '### 3) Each player deposits USDC from their own wallet',
+    'This returns `matchId` + `matchIdHex` and ensures the escrow match exists onchain.',
+    '',
+    '### 3) Each player deposits USDC from their own wallet (before start)',
     '',
     '```bash',
     'SEPOLIA_RPC_URL=<rpc> PLAYER_PRIVATE_KEY=<player_private_key> \\',
@@ -229,9 +247,20 @@ function skillMarkdown(apiBase: string) {
     '  -H "Authorization: Bearer YOUR_API_KEY"',
     '```',
     '',
-    'Both `playerADeposited` and `playerBDeposited` must be true.',
+    'Both `playerADeposited` and `playerBDeposited` must be true before `/challenges/:id/start`.',
     '',
-    '### 5) Settlement',
+    '### 5) Start challenge',
+    '',
+    '```bash',
+    `curl -X POST ${apiBase}/challenges/CHALLENGE_ID/start \\`,
+    '  -H "Authorization: Bearer YOUR_API_KEY" \\',
+    '  -H "Content-Type: application/json" \\',
+    '  -d "{}"',
+    '```',
+    '',
+    'If deposits are missing, start returns `escrow_pending_deposits`.',
+    '',
+    '### 6) Settlement',
     '',
     '- Automatic: on challenge completion, automation attempts escrow settlement when deposits are complete.',
     '- Manual tick (operator):',
@@ -338,27 +367,75 @@ export async function installRoutes(app: FastifyInstance) {
     const providedApiKey = (body.apiKey || body.api_key || '').trim();
     const agentApiKey = providedApiKey || existingAgent?.apiKey || `mc_${randomBytes(24).toString('hex')}`;
     const providedEndpoint = body.endpoint?.trim();
-    const endpoint = providedEndpoint || existingAgent?.endpoint || defaultAgentEndpoint(agentId);
-    const agentMode = providedEndpoint ? 'endpoint' : 'simple';
+    const allowSimpleMode = simpleModeEnabledByDefault();
+
+    const existingMode = typeof existingAgent?.metadata?.agentMode === 'string'
+      ? existingAgent.metadata.agentMode
+      : existingAgent
+        ? (existingAgent.endpoint.startsWith('https://agent.local/') ? 'simple' : 'endpoint')
+        : undefined;
+
+    const agentMode = providedEndpoint
+      ? 'endpoint'
+      : (existingMode === 'endpoint' || existingMode === 'simple'
+          ? existingMode
+          : (allowSimpleMode ? 'simple' : 'endpoint'));
+
+    const endpoint = providedEndpoint
+      || existingAgent?.endpoint
+      || (agentMode === 'simple' ? defaultAgentEndpoint(agentId) : undefined);
+
+    if (agentMode === 'endpoint' && !endpoint) {
+      return reply.code(400).send({
+        error: 'endpoint_required',
+        message: 'Endpoint mode is required. Provide a reachable endpoint URL.'
+      });
+    }
+
+    if (!allowSimpleMode && agentMode !== 'endpoint') {
+      return reply.code(400).send({
+        error: 'endpoint_required',
+        message: 'Simple mode is disabled. Register with endpoint + sandbox + eigencompute metadata.'
+      });
+    }
+
+    const inheritedSandbox = existingAgent?.metadata?.sandbox;
+    const inheritedEigencompute = existingAgent?.metadata?.eigencompute;
+
+    if (agentMode === 'endpoint' && !(body.sandbox || inheritedSandbox)) {
+      return reply.code(400).send({
+        error: 'sandbox_metadata_required',
+        message: 'Endpoint mode requires sandbox metadata: runtime/version/cpu/memory.'
+      });
+    }
+
+    if (agentMode === 'endpoint' && !(body.eigencompute || inheritedEigencompute)) {
+      return reply.code(400).send({
+        error: 'eigencompute_metadata_required',
+        message: 'Endpoint mode requires eigencompute metadata: appId (+ optional environment/imageDigest).'
+      });
+    }
 
     const normalized = {
       id: agentId,
       name: (body.name || body.agent_name || agentId).trim(),
-      endpoint,
+      endpoint: endpoint!,
       payoutAddress: (body.payoutAddress || body.payout_address || '').trim() || undefined,
       apiKey: agentApiKey,
       metadata: {
+        ...(existingAgent?.metadata || {}),
         ...(body.metadata || {}),
         ...(body.bio ? { bio: body.bio } : {}),
         ...(body.preferred_topics ? { preferredTopics: body.preferred_topics } : {}),
         ...(body.sandbox ? { sandbox: body.sandbox } : {}),
+        ...(body.eigencompute ? { eigencompute: body.eigencompute } : {}),
         agentMode,
         installedVia: 'skill.md',
         installedAt: new Date().toISOString()
       }
     };
 
-    const health = providedEndpoint
+    const health = agentMode === 'endpoint'
       ? await checkAgentHealth({
           id: normalized.id,
           name: normalized.name,

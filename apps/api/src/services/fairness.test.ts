@@ -1,14 +1,28 @@
 import { describe, expect, it } from 'vitest';
-import { checkSandboxParity } from './fairness.js';
+import {
+  checkSandboxParity,
+  evaluateStrictSandboxPolicy,
+  checkEigenComputeParity
+} from './fairness.js';
 import type { RegisteredAgent } from './store.js';
 
-function agent(id: string, sandbox?: Record<string, unknown>): RegisteredAgent {
+function agent(params: {
+  id: string;
+  sandbox?: Record<string, unknown>;
+  eigencompute?: Record<string, unknown>;
+  endpoint?: string;
+  metadata?: Record<string, unknown>;
+}): RegisteredAgent {
   return {
-    id,
-    name: id,
-    endpoint: `https://${id}.example.com`,
+    id: params.id,
+    name: params.id,
+    endpoint: params.endpoint ?? `https://${params.id}.example.com`,
     enabled: true,
-    metadata: sandbox ? { sandbox } : {},
+    metadata: {
+      ...(params.metadata || {}),
+      ...(params.sandbox ? { sandbox: params.sandbox } : {}),
+      ...(params.eigencompute ? { eigencompute: params.eigencompute } : {})
+    },
     lastHealthStatus: 'unknown',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -18,8 +32,8 @@ function agent(id: string, sandbox?: Record<string, unknown>): RegisteredAgent {
 describe('sandbox parity', () => {
   it('passes when sandbox profiles are symmetric', () => {
     const result = checkSandboxParity([
-      agent('a1', { runtime: 'node', version: '20.11', cpu: 2, memory: 2048 }),
-      agent('a2', { runtime: 'node', version: '20.11', cpu: 2, memory: 2048 })
+      agent({ id: 'a1', sandbox: { runtime: 'node', version: '20.11', cpu: 2, memory: 2048 } }),
+      agent({ id: 'a2', sandbox: { runtime: 'node', version: '20.11', cpu: 2, memory: 2048 } })
     ], true);
 
     expect(result.passed).toBe(true);
@@ -28,8 +42,8 @@ describe('sandbox parity', () => {
 
   it('fails when sandbox profiles mismatch', () => {
     const result = checkSandboxParity([
-      agent('a1', { runtime: 'node', version: '20.11', cpu: 2, memory: 2048 }),
-      agent('a2', { runtime: 'node', version: '20.11', cpu: 4, memory: 2048 })
+      agent({ id: 'a1', sandbox: { runtime: 'node', version: '20.11', cpu: 2, memory: 2048 } }),
+      agent({ id: 'a2', sandbox: { runtime: 'node', version: '20.11', cpu: 4, memory: 2048 } })
     ], true);
 
     expect(result.passed).toBe(false);
@@ -38,9 +52,73 @@ describe('sandbox parity', () => {
   });
 
   it('fails when required and profile metadata is missing', () => {
-    const result = checkSandboxParity([agent('a1'), agent('a2')], true);
+    const result = checkSandboxParity([agent({ id: 'a1' }), agent({ id: 'a2' })], true);
 
     expect(result.passed).toBe(false);
     expect(result.reason).toBe('missing_sandbox_profiles');
+  });
+});
+
+describe('eigencompute parity', () => {
+  it('fails when required and eigencompute metadata missing', () => {
+    const result = checkEigenComputeParity([
+      agent({ id: 'a1' }),
+      agent({ id: 'a2' })
+    ], true);
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toBe('missing_eigencompute_profiles');
+  });
+
+  it('passes with valid metadata', () => {
+    const result = checkEigenComputeParity([
+      agent({ id: 'a1', eigencompute: { appId: '0x1111111111111111111111111111111111111111', environment: 'sepolia' } }),
+      agent({ id: 'a2', eigencompute: { appId: '0x2222222222222222222222222222222222222222', environment: 'sepolia' } })
+    ], true);
+
+    expect(result.passed).toBe(true);
+  });
+});
+
+describe('strict sandbox policy', () => {
+  it('rejects simple mode when endpoint execution is required', () => {
+    const result = evaluateStrictSandboxPolicy({
+      agents: [
+        agent({ id: 'a1', endpoint: 'https://agent.local/a1', sandbox: { runtime: 'node', version: '20.11', cpu: 2, memory: 2048 } }),
+        agent({ id: 'a2', endpoint: 'https://agent.local/a2', sandbox: { runtime: 'node', version: '20.11', cpu: 2, memory: 2048 } })
+      ],
+      executionMode: 'simple',
+      endpointModeRequired: true,
+      requireParity: true,
+      requireEigenCompute: false
+    });
+
+    expect(result.passed).toBe(false);
+    expect(result.reason).toContain('agent_mode_not_endpoint');
+    expect(result.strictVerified).toBe(false);
+  });
+
+  it('passes strict mode for endpoint execution with parity + eigencompute metadata', () => {
+    const result = evaluateStrictSandboxPolicy({
+      agents: [
+        agent({
+          id: 'a1',
+          sandbox: { runtime: 'node', version: '20.11', cpu: 2, memory: 2048 },
+          eigencompute: { appId: '0x1111111111111111111111111111111111111111', environment: 'sepolia' }
+        }),
+        agent({
+          id: 'a2',
+          sandbox: { runtime: 'node', version: '20.11', cpu: 2, memory: 2048 },
+          eigencompute: { appId: '0x2222222222222222222222222222222222222222', environment: 'sepolia' }
+        })
+      ],
+      executionMode: 'endpoint',
+      endpointModeRequired: true,
+      requireParity: true,
+      requireEigenCompute: true
+    });
+
+    expect(result.passed).toBe(true);
+    expect(result.strictVerified).toBe(true);
   });
 });

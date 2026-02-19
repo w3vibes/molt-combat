@@ -11,6 +11,15 @@ function signerPrivateKey(): string | undefined {
 }
 
 function payloadForMatch(match: MatchRecord): MatchAttestationPayload {
+  const fairness = match.audit?.fairness;
+  const executionMode = fairness?.executionMode ?? 'unknown';
+  const strictVerified =
+    fairness?.strictVerified === true &&
+    fairness.executionMode === 'endpoint' &&
+    (!fairness.endpointExecutionRequired || fairness.endpointExecutionPassed === true) &&
+    (!fairness.sandboxParityEnforced || fairness.sandboxParityPassed === true) &&
+    (!fairness.eigenComputeEnforced || fairness.eigenComputePassed === true);
+
   return {
     matchId: match.id,
     startedAt: match.startedAt,
@@ -19,7 +28,9 @@ function payloadForMatch(match: MatchRecord): MatchAttestationPayload {
     scorecardHash: match.scorecardHash ?? '',
     replayHash: stableHash(match.replay),
     auditHash: stableHash(match.audit ?? null),
-    agentIds: match.agents.map((agent) => agent.id)
+    agentIds: match.agents.map((agent) => agent.id),
+    executionMode,
+    strictVerified
   };
 }
 

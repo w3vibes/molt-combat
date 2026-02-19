@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { checkAgentHealth } from '../services/agentClient.js';
 import { requireRole } from '../services/access.js';
+import { resolveAgentExecutionMode, simpleModeEnabledByDefault } from '../services/fairness.js';
 import { store } from '../services/store.js';
 
 const createAgentSchema = z.object({
@@ -20,12 +21,6 @@ function defaultAgentEndpoint(agentId: string) {
   return `https://agent.local/${encodeURIComponent(agentId)}`;
 }
 
-function resolveAgentMode(agent: { endpoint: string; metadata?: Record<string, unknown> }): 'simple' | 'endpoint' {
-  const metadataMode = typeof agent.metadata?.agentMode === 'string' ? agent.metadata.agentMode : undefined;
-  if (metadataMode === 'simple' || metadataMode === 'endpoint') return metadataMode;
-  return agent.endpoint.startsWith('https://agent.local/') ? 'simple' : 'endpoint';
-}
-
 function parseOrReply<T extends z.ZodTypeAny>(schema: T, input: unknown, reply: FastifyReply): z.infer<T> | null {
   const parsed = schema.safeParse(input);
   if (!parsed.success) {
@@ -33,6 +28,34 @@ function parseOrReply<T extends z.ZodTypeAny>(schema: T, input: unknown, reply: 
     return null;
   }
   return parsed.data;
+}
+
+function requireStrictAgentMetadata(params: {
+  mode: 'simple' | 'endpoint';
+  metadata?: Record<string, unknown>;
+  reply: FastifyReply;
+}): boolean {
+  if (params.mode === 'simple') return true;
+
+  const sandbox = params.metadata?.sandbox;
+  if (!sandbox || typeof sandbox !== 'object' || Array.isArray(sandbox)) {
+    params.reply.code(400).send({
+      error: 'sandbox_metadata_required',
+      message: 'Endpoint mode requires metadata.sandbox with runtime/version/cpu/memory.'
+    });
+    return false;
+  }
+
+  const eigencompute = params.metadata?.eigencompute;
+  if (!eigencompute || typeof eigencompute !== 'object' || Array.isArray(eigencompute)) {
+    params.reply.code(400).send({
+      error: 'eigencompute_metadata_required',
+      message: 'Endpoint mode requires metadata.eigencompute with appId.'
+    });
+    return false;
+  }
+
+  return true;
 }
 
 export async function agentRoutes(app: FastifyInstance) {
@@ -55,15 +78,27 @@ export async function agentRoutes(app: FastifyInstance) {
     const body = parseOrReply(createAgentSchema, req.body, reply);
     if (!body) return;
 
+    const allowSimpleMode = simpleModeEnabledByDefault();
     const mode: 'simple' | 'endpoint' = body.endpoint ? 'endpoint' : 'simple';
+
+    if (mode === 'simple' && !allowSimpleMode) {
+      return reply.code(400).send({
+        error: 'endpoint_required',
+        message: 'Simple mode is disabled. Register endpoint agents with strict metadata.'
+      });
+    }
+
+    const metadata = {
+      ...(body.metadata || {}),
+      agentMode: mode
+    };
+
+    if (!requireStrictAgentMetadata({ mode, metadata, reply })) return;
 
     const saved = store.upsertAgent({
       ...body,
       endpoint: body.endpoint || defaultAgentEndpoint(body.id),
-      metadata: {
-        ...(body.metadata || {}),
-        agentMode: mode
-      }
+      metadata
     });
     return reply.code(201).send(saved);
   });
@@ -79,9 +114,28 @@ export async function agentRoutes(app: FastifyInstance) {
     if (!patch) return;
 
     const nextEndpoint = patch.endpoint ?? existing.endpoint;
+    const mergedMetadata = {
+      ...(existing.metadata || {}),
+      ...(patch.metadata || {})
+    };
+
     const inferredMode: 'simple' | 'endpoint' = patch.endpoint
       ? 'endpoint'
-      : resolveAgentMode({ endpoint: nextEndpoint, metadata: patch.metadata ?? existing.metadata });
+      : resolveAgentExecutionMode({ endpoint: nextEndpoint, metadata: mergedMetadata });
+
+    if (inferredMode === 'simple' && !simpleModeEnabledByDefault()) {
+      return reply.code(400).send({
+        error: 'endpoint_required',
+        message: 'Simple mode is disabled. Keep this agent in endpoint mode.'
+      });
+    }
+
+    const metadata = {
+      ...mergedMetadata,
+      agentMode: inferredMode
+    };
+
+    if (!requireStrictAgentMetadata({ mode: inferredMode, metadata, reply })) return;
 
     const updated = store.upsertAgent({
       id,
@@ -90,11 +144,7 @@ export async function agentRoutes(app: FastifyInstance) {
       apiKey: patch.apiKey ?? existing.apiKey,
       payoutAddress: patch.payoutAddress ?? existing.payoutAddress,
       enabled: patch.enabled ?? existing.enabled,
-      metadata: {
-        ...(existing.metadata || {}),
-        ...(patch.metadata || {}),
-        agentMode: inferredMode
-      }
+      metadata
     });
 
     return updated;
@@ -116,7 +166,7 @@ export async function agentRoutes(app: FastifyInstance) {
     const agent = store.getAgent(id);
     if (!agent) return reply.code(404).send({ error: 'not_found' });
 
-    if (resolveAgentMode(agent) === 'simple') {
+    if (resolveAgentExecutionMode(agent) === 'simple') {
       store.setAgentHealth({
         id,
         status: 'healthy',
