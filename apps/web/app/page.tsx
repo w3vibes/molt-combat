@@ -73,6 +73,7 @@ async function fetchJson<T>(path: string): Promise<T> {
   if (readonlyApiKey) {
     headers.authorization = `Bearer ${readonlyApiKey}`;
   }
+}
 
   const res = await fetch(`${apiBase}${path}`, {
     headers,
@@ -86,7 +87,18 @@ async function fetchJson<T>(path: string): Promise<T> {
     throw new Error(json?.error || json?.message || `HTTP ${res.status}`);
   }
 
-  return json as T;
+function relativeTime(iso?: string) {
+  if (!iso) return '—';
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms)) return '—';
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  return `${day}d ago`;
 }
 
 function statusLabel(status: ChallengeStatus) {
