@@ -51,7 +51,7 @@ run_retry() {
 
   while true; do
     echo "→ [$n/$max] $cmd" >&2
-    if bash -lc "$cmd"; then
+    if bash -c "$cmd"; then
       return 0
     fi
 
@@ -74,12 +74,24 @@ run_capture_retry() {
   while true; do
     echo "→ [$n/$max] $cmd" >&2
     set +e
-    out=$(bash -lc "$cmd" 2>&1)
+    out=$(bash -c "$cmd" 2>&1)
     code=$?
     set -e
     echo "$out" >&2
 
-    if [[ $code -eq 0 ]] || echo "$out" | grep -qE "App ID:|ONCHAIN EXECUTION COMPLETE|App upgraded successfully|App is now running"; then
+    if [[ $code -eq 0 ]]; then
+      printf "%s" "$out"
+      return 0
+    fi
+
+    if echo "$out" | grep -qE "GlobalMaxActiveAppsExceeded\(\)|0x42ca568f"; then
+      echo "❌ EigenCompute global app cap reached (GlobalMaxActiveAppsExceeded)." >&2
+      echo "   New app creation is currently blocked on ${ENVIRONMENT}." >&2
+      echo "   Use existing app IDs for upgrade, switch to ECLOUD_ENV=sepolia-dev, or wait for capacity." >&2
+      return 1
+    fi
+
+    if echo "$out" | grep -qE "ONCHAIN EXECUTION COMPLETE|App upgraded successfully|App is now running"; then
       printf "%s" "$out"
       return 0
     fi
@@ -92,6 +104,75 @@ run_capture_retry() {
     n=$((n + 1))
     sleep 5
   done
+}
+
+app_owned_by_signer() {
+  local app_id="$1"
+
+  set +e
+  local list
+  list=$(ecloud compute app list --environment "$ENVIRONMENT" 2>/dev/null)
+  local status=$?
+  set -e
+
+  if [[ $status -ne 0 ]]; then
+    return 1
+  fi
+
+  echo "$list" | grep -qi "$app_id"
+}
+
+app_controller_for_env() {
+  case "$ENVIRONMENT" in
+    sepolia)
+      echo "0x0dd810a6ffba6a9820a10d97b659f07d8d23d4E2"
+      ;;
+    sepolia-dev)
+      echo "0xa86DC1C47cb2518327fB4f9A1627F51966c83B92"
+      ;;
+    mainnet-alpha)
+      echo "0xc38d35Fc995e75342A21CBd6D770305b142Fbe67"
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
+global_capacity_blocked() {
+  if ! command -v cast >/dev/null 2>&1; then
+    return 1
+  fi
+
+  local app_controller
+  app_controller=$(app_controller_for_env)
+  if [[ -z "$app_controller" ]]; then
+    return 1
+  fi
+
+  local rpc_url="${ECLOUD_RPC_URL:-https://ethereum-sepolia-rpc.publicnode.com}"
+
+  set +e
+  local active_count
+  local max_count
+  active_count=$(cast call "$app_controller" "globalActiveAppCount()(uint32)" --rpc-url "$rpc_url" 2>/dev/null | tr -d '\r')
+  local s1=$?
+  max_count=$(cast call "$app_controller" "maxGlobalActiveApps()(uint32)" --rpc-url "$rpc_url" 2>/dev/null | tr -d '\r')
+  local s2=$?
+  set -e
+
+  if [[ $s1 -ne 0 || $s2 -ne 0 ]]; then
+    return 1
+  fi
+
+  if [[ "$active_count" =~ ^[0-9]+$ && "$max_count" =~ ^[0-9]+$ && "$active_count" -ge "$max_count" ]]; then
+    echo "❌ EigenCompute global capacity is full on ${ENVIRONMENT}: ${active_count}/${max_count} active apps." >&2
+    echo "   New app creation will revert with GlobalMaxActiveAppsExceeded()." >&2
+    echo "   Use existing app IDs for upgrade, switch to ECLOUD_ENV=sepolia-dev, or wait for capacity." >&2
+    return 0
+  fi
+
+  return 1
 }
 
 latest_image_digest() {
@@ -148,10 +229,19 @@ deploy_or_upgrade_agent() {
   local env_file="$6"
 
   if [[ -n "$app_id" ]]; then
-    echo "\n=== ${label}: upgrade existing app (${app_id}) ===" >&2
-    run_retry "ecloud compute app upgrade ${app_id} --dockerfile ${dockerfile} --image-ref ${image_ref} --env-file ${env_file} --log-visibility ${LOG_VISIBILITY} --resource-usage-monitoring ${RESOURCE_MON} --instance-type ${INSTANCE_TYPE}"
-    echo "$app_id"
-    return 0
+    if app_owned_by_signer "$app_id"; then
+      echo "\n=== ${label}: upgrade existing app (${app_id}) ===" >&2
+      run_retry "ecloud compute app upgrade ${app_id} --dockerfile ${dockerfile} --image-ref ${image_ref} --env-file ${env_file} --log-visibility ${LOG_VISIBILITY} --resource-usage-monitoring ${RESOURCE_MON} --instance-type ${INSTANCE_TYPE}"
+      echo "$app_id"
+      return 0
+    fi
+
+    echo "⚠️ ${label}: ignoring stale app ID ${app_id} (not found for current signer on ${ENVIRONMENT})." >&2
+    app_id=""
+  fi
+
+  if global_capacity_blocked; then
+    exit 1
   fi
 
   echo "\n=== ${label}: first deploy (${app_name}) ===" >&2
@@ -163,6 +253,12 @@ deploy_or_upgrade_agent() {
 
   if [[ -z "$parsed_id" ]]; then
     echo "❌ Could not parse App ID for ${label}" >&2
+    exit 1
+  fi
+
+  if ! app_owned_by_signer "$parsed_id"; then
+    echo "❌ ${label}: parsed App ID ${parsed_id} is not active for current signer on ${ENVIRONMENT}." >&2
+    echo "   Most likely createApp reverted before on-chain execution completed." >&2
     exit 1
   fi
 
