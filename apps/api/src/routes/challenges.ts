@@ -13,18 +13,23 @@ function parseOrReply<T extends z.ZodTypeAny>(schema: T, input: unknown, reply: 
 }
 import { checkAgentHealth } from '../services/agentClient.js';
 import { createEscrowMatch, getEscrowMatchStatus, settleEscrowMatch } from '../services/escrow.js';
+import { fundOnSepolia, getPrizePoolMatchStatus, payoutOnSepolia } from '../services/payout.js';
 import { autoResolveMarketsForMatch } from '../services/markets.js';
 import {
+  antiCollusionRequiredByDefault,
   endpointExecutionRequiredByDefault,
   evaluateStrictSandboxPolicy,
   resolveAgentExecutionMode,
   simpleModeEnabledByDefault,
   toMatchFairnessAudit
 } from '../services/fairness.js';
+import { eigenSignerRequiredByDefault, eigenTurnProofRequiredByDefault } from '../services/eigenProof.js';
+import { evaluateHeadToHeadCollusionRisk } from '../services/collusion.js';
 import { runEscrowSettlementTick } from '../services/automation.js';
 import { signMatchAttestation } from '../services/attestation.js';
 import { RegisteredAgent, store } from '../services/store.js';
-import { AgentAction, AgentState, MatchConfig, MatchRecord } from '../types/domain.js';
+import { tournamentStore } from '../services/tournaments.js';
+import { AgentAction, AgentState, ChallengeRecord, MatchConfig, MatchRecord } from '../types/domain.js';
 import { stableHash } from '../utils/hash.js';
 import { toMatchIdHex } from '../utils/ids.js';
 
@@ -52,6 +57,12 @@ const stakeSchema = z.discriminatedUnion('mode', [
     amountPerPlayer: z.string(),
     playerA: z.string(),
     playerB: z.string()
+  }),
+  z.object({
+    mode: z.literal('eth'),
+    contractAddress: z.string(),
+    amountEth: z.string(),
+    autoFund: z.boolean().optional()
   })
 ]).default({ mode: 'none' as const });
 
@@ -149,7 +160,9 @@ function defaultManualAudit(fairnessOverride?: NonNullable<MatchRecord['audit']>
       responseBytes: 0,
       timeouts: 0,
       fallbackHolds: 0,
-      invalidActions: 0
+      invalidActions: 0,
+      policyViolations: 0,
+      eigenProofFailures: 0
     }
   };
 }
@@ -164,19 +177,57 @@ function appendNotes(...items: Array<string | undefined>) {
   return items.filter(Boolean).join('\n') || undefined;
 }
 
+function extractTaggedValue(notes: string | undefined, tag: string): string | undefined {
+  if (!notes) return undefined;
+
+  const prefix = `${tag}:`;
+  for (const line of notes.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.toLowerCase().startsWith(prefix.toLowerCase())) {
+      return trimmed.slice(prefix.length).trim() || undefined;
+    }
+  }
+
+  return undefined;
+}
+
+function syncTournamentFixtureFromChallenge(challenge: ChallengeRecord) {
+  const tournamentId = extractTaggedValue(challenge.notes, 'tournament_id');
+  const fixtureId = extractTaggedValue(challenge.notes, 'tournament_fixture');
+
+  if (!tournamentId || !fixtureId) {
+    return null;
+  }
+
+  const fixture = tournamentStore.syncFixtureFromChallenge({
+    tournamentId,
+    fixtureId,
+    challengeId: challenge.id,
+    challengeStatus: challenge.status,
+    challengeMatchId: challenge.matchId,
+    challengeWinnerAgentId: challenge.winnerAgentId
+  });
+
+  return {
+    tournamentId,
+    fixtureId,
+    fixture
+  };
+}
+
 function winnerWalletForChallenge(challenge: {
   challengerAgentId: string;
   opponentAgentId?: string;
-  stake: { mode: 'none' | 'usdc'; playerA?: string; playerB?: string };
+  stake: { mode: 'none' | 'usdc' | 'eth'; playerA?: string; playerB?: string };
 }, winnerAgentId: string): string | null {
-  if (challenge.stake.mode !== 'usdc') return null;
+  if (challenge.stake.mode === 'usdc') {
+    if (winnerAgentId === challenge.challengerAgentId) {
+      return challenge.stake.playerA || null;
+    }
 
-  if (winnerAgentId === challenge.challengerAgentId) {
-    return challenge.stake.playerA || null;
-  }
-
-  if (winnerAgentId === challenge.opponentAgentId) {
-    return challenge.stake.playerB || null;
+    if (winnerAgentId === challenge.opponentAgentId) {
+      return challenge.stake.playerB || null;
+    }
   }
 
   const winnerAgent = store.getAgent(winnerAgentId);
@@ -200,6 +251,10 @@ async function runChallengeMatch(params: {
 
   if (params.fairnessAudit.eigenComputeEnforced && !params.fairnessAudit.eigenComputePassed) {
     throw new Error(`eigencompute_policy_failed:${params.fairnessAudit.rejectionReason || 'unknown'}`);
+  }
+
+  if (params.fairnessAudit.collusionCheckRequired && params.fairnessAudit.collusionCheckPassed === false) {
+    throw new Error(`collusion_policy_failed:${params.fairnessAudit.rejectionReason || 'unknown'}`);
   }
 
   const match = await runMatch({
@@ -243,6 +298,24 @@ type EscrowPrepareResult = {
   status: EscrowOnchainStatus | null;
   error: string | null;
 };
+
+type EthOnchainStatus = Awaited<ReturnType<typeof getPrizePoolMatchStatus>>;
+
+type EthPrepareResult = {
+  ok: boolean;
+  challenge: NonNullable<ReturnType<typeof store.getChallenge>>;
+  matchId: string;
+  matchIdHex: string;
+  txHash: string | null;
+  funded: boolean;
+  status: EthOnchainStatus | null;
+  error: string | null;
+  readyToStart: boolean;
+};
+
+function requireEthFundingBeforeStart(): boolean {
+  return process.env.MATCH_REQUIRE_ETH_FUNDING_BEFORE_START !== 'false';
+}
 
 function normalizeAddress(value: string | undefined | null): string {
   return (value || '').trim().toLowerCase();
@@ -436,6 +509,120 @@ async function prepareChallengeEscrow(challengeId: string, challenge: NonNullabl
   };
 }
 
+async function prepareChallengeEthPrize(challengeId: string, challenge: NonNullable<ReturnType<typeof store.getChallenge>>): Promise<EthPrepareResult> {
+  const { challenge: withMatchId, matchId } = ensureChallengeMatchId(challengeId, challenge);
+  const matchIdHex = toMatchIdHex(matchId);
+
+  if (withMatchId.stake.mode !== 'eth') {
+    return {
+      ok: false,
+      challenge: withMatchId,
+      matchId,
+      matchIdHex,
+      txHash: null,
+      funded: false,
+      status: null,
+      error: 'stake_mode_not_eth',
+      readyToStart: false
+    };
+  }
+
+  const signerKey = process.env.PAYOUT_SIGNER_PRIVATE_KEY || process.env.OPERATOR_PRIVATE_KEY;
+  const contractAddress = withMatchId.stake.contractAddress;
+  const amountEth = withMatchId.stake.amountEth;
+
+  if (!contractAddress || !amountEth) {
+    return {
+      ok: false,
+      challenge: withMatchId,
+      matchId,
+      matchIdHex,
+      txHash: null,
+      funded: false,
+      status: null,
+      error: 'missing_eth_stake_fields',
+      readyToStart: false
+    };
+  }
+
+  if (!process.env.SEPOLIA_RPC_URL || !signerKey) {
+    return {
+      ok: false,
+      challenge: withMatchId,
+      matchId,
+      matchIdHex,
+      txHash: null,
+      funded: false,
+      status: null,
+      error: 'missing_chain_config',
+      readyToStart: false
+    };
+  }
+
+  let status: EthOnchainStatus | null = null;
+  let txHash: string | null = null;
+
+  try {
+    status = await getPrizePoolMatchStatus({
+      rpcUrl: process.env.SEPOLIA_RPC_URL,
+      contractAddress,
+      matchIdHex
+    });
+  } catch {
+    status = null;
+  }
+
+  const isFunded = (status?.fundedAmountWei || '0') !== '0';
+  const shouldAutoFund = withMatchId.stake.autoFund === true || process.env.MATCH_ETH_AUTOFUND === 'true';
+
+  if (!isFunded && shouldAutoFund) {
+    try {
+      const receipt = await fundOnSepolia({
+        contractAddress,
+        privateKey: signerKey,
+        rpcUrl: process.env.SEPOLIA_RPC_URL,
+        matchIdHex,
+        amountEth
+      });
+
+      txHash = receipt?.hash ?? null;
+
+      status = await getPrizePoolMatchStatus({
+        rpcUrl: process.env.SEPOLIA_RPC_URL,
+        contractAddress,
+        matchIdHex
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        challenge: withMatchId,
+        matchId,
+        matchIdHex,
+        txHash,
+        funded: false,
+        status,
+        error: error instanceof Error ? error.message : 'eth_funding_failed',
+        readyToStart: false
+      };
+    }
+  }
+
+  const funded = (status?.fundedAmountWei || '0') !== '0';
+  const readyToStart = requireEthFundingBeforeStart() ? funded : true;
+
+  return {
+    ok: true,
+    challenge: withMatchId,
+    matchId,
+    matchIdHex,
+    txHash,
+    funded,
+    status,
+    error: null,
+    readyToStart
+  };
+}
+
 async function finalizeChallengeFromMatch(params: {
   challengeId: string;
   challenge: NonNullable<ReturnType<typeof store.getChallenge>>;
@@ -463,6 +650,8 @@ async function finalizeChallengeFromMatch(params: {
       notes: appendNotes(baseNotes, 'winner_undetermined')
     });
 
+    const tournament = updated ? syncTournamentFixtureFromChallenge(updated) : null;
+
     return {
       ok: true,
       challenge: updated,
@@ -482,6 +671,7 @@ async function finalizeChallengeFromMatch(params: {
         error: params.escrowError ?? null,
         automation: null
       },
+      tournament,
       message: 'Match ended without a decisive winner. Use /challenges/:id/adjudicate to set winner and settle.'
     };
   }
@@ -500,7 +690,9 @@ async function finalizeChallengeFromMatch(params: {
     notes: baseNotes
   });
 
-  const automation = params.challenge.stake.mode === 'usdc'
+  const tournament = updated ? syncTournamentFixtureFromChallenge(updated) : null;
+
+  const automation = (params.challenge.stake.mode === 'usdc' || params.challenge.stake.mode === 'eth')
     ? await runEscrowSettlementTick('challenge_completion')
     : null;
 
@@ -518,7 +710,8 @@ async function finalizeChallengeFromMatch(params: {
       txHash: params.escrowTxHash ?? null,
       error: params.escrowError ?? null,
       automation
-    }
+    },
+    tournament
   };
 }
 
@@ -700,6 +893,107 @@ export async function challengeRoutes(app: FastifyInstance) {
     };
   });
 
+  app.post('/challenges/:id/payout/prepare', async (req, reply) => {
+    if (!requireRole(req, reply, 'agent')) return;
+
+    const id = (req.params as { id: string }).id;
+    const challenge = store.getChallenge(id);
+    if (!challenge) return reply.code(404).send({ error: 'not_found' });
+
+    if (challenge.status === 'completed' || challenge.status === 'cancelled') {
+      return reply.code(400).send({
+        error: 'invalid_status',
+        status: challenge.status,
+        message: 'Payout preparation is only available before challenge completion/cancellation.'
+      });
+    }
+
+    const actorAgentId = resolveActorAgentId(req);
+    const participants = [challenge.challengerAgentId, challenge.opponentAgentId].filter((value): value is string => Boolean(value));
+    if (actorAgentId && !participants.includes(actorAgentId)) {
+      return reply.code(403).send({
+        error: 'forbidden_actor',
+        actorAgentId,
+        message: 'Agent API key can only prepare payout for challenges where the authenticated agent is a participant.'
+      });
+    }
+
+    if (challenge.stake.mode === 'usdc') {
+      const escrow = await prepareChallengeEscrow(id, challenge);
+      if (!escrow.ok) {
+        return reply.code(400).send({
+          error: 'escrow_prepare_failed',
+          reason: escrow.error,
+          challenge: escrow.challenge,
+          payout: {
+            mode: 'usdc',
+            matchId: escrow.matchId,
+            matchIdHex: escrow.matchIdHex,
+            txHash: escrow.txHash,
+            created: escrow.created,
+            status: escrow.status,
+            readyToStart: false
+          }
+        });
+      }
+
+      return {
+        ok: true,
+        challenge: escrow.challenge,
+        payout: {
+          mode: 'usdc',
+          matchId: escrow.matchId,
+          matchIdHex: escrow.matchIdHex,
+          txHash: escrow.txHash,
+          created: escrow.created,
+          status: escrow.status,
+          readyToStart: escrow.depositsReady
+        }
+      };
+    }
+
+    if (challenge.stake.mode === 'eth') {
+      const eth = await prepareChallengeEthPrize(id, challenge);
+      if (!eth.ok) {
+        return reply.code(400).send({
+          error: 'eth_prize_prepare_failed',
+          reason: eth.error,
+          challenge: eth.challenge,
+          payout: {
+            mode: 'eth',
+            matchId: eth.matchId,
+            matchIdHex: eth.matchIdHex,
+            txHash: eth.txHash,
+            status: eth.status,
+            funded: eth.funded,
+            readyToStart: false,
+            requireFundingBeforeStart: requireEthFundingBeforeStart()
+          }
+        });
+      }
+
+      return {
+        ok: true,
+        challenge: eth.challenge,
+        payout: {
+          mode: 'eth',
+          matchId: eth.matchId,
+          matchIdHex: eth.matchIdHex,
+          txHash: eth.txHash,
+          status: eth.status,
+          funded: eth.funded,
+          readyToStart: eth.readyToStart,
+          requireFundingBeforeStart: requireEthFundingBeforeStart()
+        }
+      };
+    }
+
+    return reply.code(400).send({
+      error: 'stake_mode_not_supported',
+      message: 'Challenge has no payout preparation requirements for this stake mode.'
+    });
+  });
+
   app.post('/challenges/:id/start', async (req, reply) => {
     if (!requireRole(req, reply, 'agent')) return;
 
@@ -764,10 +1058,20 @@ export async function challengeRoutes(app: FastifyInstance) {
     }
 
     const executionMode = simpleModeRequested ? 'simple' : 'endpoint';
+    const collusionRisk = evaluateHeadToHeadCollusionRisk({
+      agentAId: challenger.id,
+      agentBId: opponent.id,
+      matches: store.listMatches(),
+      required: antiCollusionRequiredByDefault()
+    });
+
     const strictPolicy = evaluateStrictSandboxPolicy({
       agents: [challenger, opponent],
       executionMode,
-      endpointModeRequired: endpointExecutionRequiredByDefault()
+      endpointModeRequired: endpointExecutionRequiredByDefault(),
+      requireEigenSigner: eigenSignerRequiredByDefault(),
+      requireEigenTurnProof: eigenTurnProofRequiredByDefault(),
+      collusionRisk
     });
     const fairnessAudit = toMatchFairnessAudit(strictPolicy);
 
@@ -780,13 +1084,17 @@ export async function challengeRoutes(app: FastifyInstance) {
           endpointModeRequired: strictPolicy.endpointModeRequired,
           endpointModePassed: strictPolicy.endpointModePassed,
           parity: strictPolicy.parity,
-          eigenCompute: strictPolicy.eigenCompute
+          eigenCompute: strictPolicy.eigenCompute,
+          eigenTurnProof: strictPolicy.eigenTurnProof,
+          independence: strictPolicy.independence,
+          collusion: strictPolicy.collusion
         }
       });
     }
 
     let challengeForStart = challenge;
     let escrowPreflight: EscrowPrepareResult | null = null;
+    let ethPreflight: EthPrepareResult | null = null;
 
     if (challenge.stake.mode === 'usdc') {
       escrowPreflight = await prepareChallengeEscrow(id, challenge);
@@ -829,6 +1137,54 @@ export async function challengeRoutes(app: FastifyInstance) {
             created: escrowPreflight.created,
             status: escrowPreflight.status,
             readyToStart: false
+          }
+        });
+      }
+    }
+
+    if (challenge.stake.mode === 'eth') {
+      ethPreflight = await prepareChallengeEthPrize(id, challengeForStart);
+      challengeForStart = ethPreflight.challenge;
+
+      if (!ethPreflight.ok) {
+        return reply.code(400).send({
+          error: 'eth_prize_prepare_failed',
+          reason: ethPreflight.error,
+          message: 'Failed to prepare ETH prize pool before challenge start.',
+          challenge: challengeForStart,
+          payout: {
+            mode: 'eth',
+            matchId: ethPreflight.matchId,
+            matchIdHex: ethPreflight.matchIdHex,
+            txHash: ethPreflight.txHash,
+            status: ethPreflight.status,
+            funded: ethPreflight.funded,
+            readyToStart: false,
+            requireFundingBeforeStart: requireEthFundingBeforeStart()
+          }
+        });
+      }
+
+      if (!ethPreflight.readyToStart) {
+        const reverted = store.patchChallenge(id, {
+          status: 'accepted',
+          opponentAgentId,
+          matchId: ethPreflight.matchId
+        });
+
+        return reply.code(409).send({
+          error: 'eth_prize_not_funded',
+          message: 'ETH prize must be funded before challenge start.',
+          challenge: reverted ?? challengeForStart,
+          payout: {
+            mode: 'eth',
+            matchId: ethPreflight.matchId,
+            matchIdHex: ethPreflight.matchIdHex,
+            txHash: ethPreflight.txHash,
+            status: ethPreflight.status,
+            funded: ethPreflight.funded,
+            readyToStart: false,
+            requireFundingBeforeStart: requireEthFundingBeforeStart()
           }
         });
       }
@@ -954,8 +1310,8 @@ export async function challengeRoutes(app: FastifyInstance) {
         challenge: challengeForStart,
         opponentAgentId,
         match,
-        escrowTxHash: escrowPreflight?.txHash ?? null,
-        escrowError: escrowPreflight?.error ?? null
+        escrowTxHash: escrowPreflight?.txHash ?? ethPreflight?.txHash ?? null,
+        escrowError: escrowPreflight?.error ?? ethPreflight?.error ?? null
       });
     } catch (error) {
       store.patchChallenge(id, { status: 'accepted', opponentAgentId, matchId });
@@ -985,6 +1341,7 @@ export async function challengeRoutes(app: FastifyInstance) {
     const parsed = z.object({
       winnerAgentId: z.string().min(1),
       settleEscrow: z.boolean().optional(),
+      settlePayout: z.boolean().optional(),
       note: z.string().max(600).optional()
     }).safeParse(req.body || {});
 
@@ -1045,27 +1402,33 @@ export async function challengeRoutes(app: FastifyInstance) {
       )
     });
 
+    const tournament = updated ? syncTournamentFixtureFromChallenge(updated) : null;
+
     const marketResolution = autoResolveMarketsForMatch({
       matchId: adjudicatedMatch.id,
       challengeId: id,
       winnerAgentId: body.winnerAgentId
     });
 
-    let escrowResult: {
+    const settleNow = body.settlePayout ?? body.settleEscrow ?? false;
+
+    let payoutResult: {
       attempted: boolean;
       txHash?: string;
       error?: string;
       winnerWallet?: string;
+      mode?: 'usdc' | 'eth';
     } = { attempted: false };
 
-    if (body.settleEscrow && challenge.stake.mode === 'usdc') {
+    if (settleNow && challenge.stake.mode === 'usdc') {
       const signerKey = process.env.PAYOUT_SIGNER_PRIVATE_KEY || process.env.OPERATOR_PRIVATE_KEY;
       const contractAddress = challenge.stake.contractAddress;
       const winnerWallet = winnerWalletForChallenge(challenge, body.winnerAgentId);
 
       if (!process.env.SEPOLIA_RPC_URL || !signerKey || !contractAddress || !winnerWallet) {
-        escrowResult = {
+        payoutResult = {
           attempted: true,
+          mode: 'usdc',
           error: 'missing_chain_or_winner_wallet_config',
           winnerWallet: winnerWallet || undefined
         };
@@ -1079,14 +1442,16 @@ export async function challengeRoutes(app: FastifyInstance) {
             winner: winnerWallet
           });
 
-          escrowResult = {
+          payoutResult = {
             attempted: true,
+            mode: 'usdc',
             txHash: receipt?.hash ?? undefined,
             winnerWallet
           };
         } catch (error) {
-          escrowResult = {
+          payoutResult = {
             attempted: true,
+            mode: 'usdc',
             error: error instanceof Error ? error.message : 'escrow_settle_failed',
             winnerWallet
           };
@@ -1094,7 +1459,46 @@ export async function challengeRoutes(app: FastifyInstance) {
       }
     }
 
-    const automation = challenge.stake.mode === 'usdc'
+    if (settleNow && challenge.stake.mode === 'eth') {
+      const signerKey = process.env.PAYOUT_SIGNER_PRIVATE_KEY || process.env.OPERATOR_PRIVATE_KEY;
+      const contractAddress = challenge.stake.contractAddress;
+      const winnerWallet = winnerWalletForChallenge(challenge, body.winnerAgentId);
+
+      if (!process.env.SEPOLIA_RPC_URL || !signerKey || !contractAddress || !winnerWallet) {
+        payoutResult = {
+          attempted: true,
+          mode: 'eth',
+          error: 'missing_chain_or_winner_wallet_config',
+          winnerWallet: winnerWallet || undefined
+        };
+      } else {
+        try {
+          const receipt = await payoutOnSepolia({
+            contractAddress,
+            privateKey: signerKey,
+            rpcUrl: process.env.SEPOLIA_RPC_URL,
+            matchIdHex: toMatchIdHex(adjudicatedMatch.id),
+            winner: winnerWallet
+          });
+
+          payoutResult = {
+            attempted: true,
+            mode: 'eth',
+            txHash: receipt?.hash ?? undefined,
+            winnerWallet
+          };
+        } catch (error) {
+          payoutResult = {
+            attempted: true,
+            mode: 'eth',
+            error: error instanceof Error ? error.message : 'eth_payout_failed',
+            winnerWallet
+          };
+        }
+      }
+    }
+
+    const automation = (challenge.stake.mode === 'usdc' || challenge.stake.mode === 'eth')
       ? await runEscrowSettlementTick('manual_adjudication')
       : null;
 
@@ -1107,10 +1511,15 @@ export async function challengeRoutes(app: FastifyInstance) {
       },
       attestation: attestation ?? null,
       markets: marketResolution,
-      escrow: {
-        ...escrowResult,
+      payout: {
+        ...payoutResult,
         automation
-      }
+      },
+      escrow: {
+        ...payoutResult,
+        automation
+      },
+      tournament
     };
   });
 

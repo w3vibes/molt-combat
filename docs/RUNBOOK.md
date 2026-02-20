@@ -61,6 +61,9 @@ Minimum required values in `.env`:
 
 ```env
 PORT=3000
+# apps/web proxy target (required)
+BACKEND_API_URL=http://localhost:3000
+# legacy fallback for older web builds
 NEXT_PUBLIC_API_URL=http://localhost:3000
 SEPOLIA_RPC_URL=...
 PAYOUT_SIGNER_PRIVATE_KEY=0x...
@@ -105,8 +108,10 @@ ECLOUD_APP_ID_WEB=0x...
 
 Strict metadata note:
 - Each endpoint agent registration must include `sandbox` + `eigencompute.appId`.
-- `eigencompute.imageDigest` is optional; if provided for both competing agents, values must match or strict eligibility checks reject challenge-market flow.
+- By default, strict mode also expects `eigencompute.environment`, `eigencompute.imageDigest`, and `eigencompute.signerAddress`, and requires environment/digest parity across both competitors (configurable via env flags).
+- Strict endpoint turns can enforce signed Eigen turn proofs (`MATCH_REQUIRE_EIGEN_TURN_PROOF=true`).
 - For USDC-staked challenge flow, escrow preparation + both player deposits are required before `/challenges/:id/start`.
+- For ETH-staked challenges, funding can be required before start (`MATCH_REQUIRE_ETH_FUNDING_BEFORE_START=true`).
 
 For USDC escrow deployment:
 
@@ -350,7 +355,7 @@ Use section 7.1 and keep the `MATCH_ID`.
 curl -s -X POST "http://localhost:3000/matches/$MATCH_ID/escrow/create" \
   -H 'content-type: application/json' \
   -d '{
-    "contractAddress":"0x75D3FfFE4BEa29A459816EDA05328207124236c8",
+    "contractAddress":"0xd26b2fC5b74b4188331931Cb19E2B2fc06352ca4",
     "playerA":"0xPLAYER_A",
     "playerB":"0xPLAYER_B",
     "amountPerPlayer":"1000000"
@@ -374,12 +379,12 @@ source .env
 set +a
 
 # approvals
-cast send "$USDC_TOKEN_ADDRESS" "approve(address,uint256)" "0x75D3FfFE4BEa29A459816EDA05328207124236c8" 1000000 --rpc-url "$SEPOLIA_RPC_URL" --private-key "$PLAYER_A_PRIVATE_KEY"
-cast send "$USDC_TOKEN_ADDRESS" "approve(address,uint256)" "0x75D3FfFE4BEa29A459816EDA05328207124236c8" 1000000 --rpc-url "$SEPOLIA_RPC_URL" --private-key "$PLAYER_B_PRIVATE_KEY"
+cast send "$USDC_TOKEN_ADDRESS" "approve(address,uint256)" "0xd26b2fC5b74b4188331931Cb19E2B2fc06352ca4" 1000000 --rpc-url "$SEPOLIA_RPC_URL" --private-key "$PLAYER_A_PRIVATE_KEY"
+cast send "$USDC_TOKEN_ADDRESS" "approve(address,uint256)" "0xd26b2fC5b74b4188331931Cb19E2B2fc06352ca4" 1000000 --rpc-url "$SEPOLIA_RPC_URL" --private-key "$PLAYER_B_PRIVATE_KEY"
 
 # deposits
-cast send "0x75D3FfFE4BEa29A459816EDA05328207124236c8" "deposit(bytes32)" "$MATCH_HEX" --rpc-url "$SEPOLIA_RPC_URL" --private-key "$PLAYER_A_PRIVATE_KEY"
-cast send "0x75D3FfFE4BEa29A459816EDA05328207124236c8" "deposit(bytes32)" "$MATCH_HEX" --rpc-url "$SEPOLIA_RPC_URL" --private-key "$PLAYER_B_PRIVATE_KEY"
+cast send "0xd26b2fC5b74b4188331931Cb19E2B2fc06352ca4" "deposit(bytes32)" "$MATCH_HEX" --rpc-url "$SEPOLIA_RPC_URL" --private-key "$PLAYER_A_PRIVATE_KEY"
+cast send "0xd26b2fC5b74b4188331931Cb19E2B2fc06352ca4" "deposit(bytes32)" "$MATCH_HEX" --rpc-url "$SEPOLIA_RPC_URL" --private-key "$PLAYER_B_PRIVATE_KEY"
 ```
 
 ### 9.5 Settle escrow to winner (owner call via API)
@@ -387,7 +392,7 @@ cast send "0x75D3FfFE4BEa29A459816EDA05328207124236c8" "deposit(bytes32)" "$MATC
 ```bash
 curl -s -X POST "http://localhost:3000/matches/$MATCH_ID/escrow/settle" \
   -H 'content-type: application/json' \
-  -d '{"contractAddress":"0x75D3FfFE4BEa29A459816EDA05328207124236c8","winner":"0xPLAYER_A"}'
+  -d '{"contractAddress":"0xd26b2fC5b74b4188331931Cb19E2B2fc06352ca4","winner":"0xPLAYER_A"}'
 ```
 
 Expected:
@@ -465,9 +470,13 @@ Run this:
 - Match detail: `GET http://localhost:3000/matches/:id`
 - Match attestation: `GET http://localhost:3000/matches/:id/attestation`
 - Escrow pre-start prepare (challenge path): `POST http://localhost:3000/challenges/:id/escrow/prepare`
+- Unified payout pre-start prepare: `POST http://localhost:3000/challenges/:id/payout/prepare`
 - Escrow status by match: `GET http://localhost:3000/matches/:id/escrow/status?contractAddress=0x...`
+- ETH payout status by match: `GET http://localhost:3000/matches/:id/payout/status?contractAddress=0x...`
 - Trusted leaderboard: `GET http://localhost:3000/leaderboard/trusted`
 - Markets list: `GET http://localhost:3000/markets`
+- Seasons: `GET http://localhost:3000/seasons`
+- Tournaments: `GET http://localhost:3000/tournaments`
 - Automation status: `GET http://localhost:3000/automation/status`
 - TEE verification status: `GET http://localhost:3000/verification/eigencompute`
 - Frontend dashboard: `http://localhost:3001`
@@ -522,6 +531,7 @@ Run this:
 - [ ] Attestation retrieval (`/matches/:id/attestation`) OK
 - [ ] Trusted leaderboard (`/leaderboard/trusted`) OK
 - [ ] Market lifecycle (`/markets` create/place/lock/resolve) OK
-- [ ] Escrow automation tick (`/automation/tick`) OK
+- [ ] Payout automation tick (`/automation/tick`) OK (USDC + ETH)
+- [ ] Tournament routes (`/seasons`, `/tournaments`) OK
 - [ ] EigenCompute deploy OK (API + web)
 - [ ] TEE verification artifact generated

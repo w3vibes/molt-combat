@@ -6,10 +6,9 @@ import {
   MatchConfig,
   MatchFairnessAudit,
   MatchRecord,
-  MatchReplayTurn,
-  Resource
+  MatchReplayTurn
 } from '../types/domain.js';
-import { requestActionMetered } from '../services/agentClient.js';
+import { currentMeteringPolicy, requestActionMetered } from '../services/agentClient.js';
 import { stableHash } from '../utils/hash.js';
 
 function initialState(agentId: string): AgentState {
@@ -18,12 +17,12 @@ function initialState(agentId: string): AgentState {
 
 function clamp(n: number, min: number, max: number): number { return Math.max(min, Math.min(max, n)); }
 
-function applyGather(state: AgentState, resource: Resource, amount: number) {
+function applyGather(state: AgentState, resource: 'energy' | 'metal' | 'data', amount: number) {
   state.wallet[resource] += clamp(amount, 1, 10);
   state.score += 1;
 }
 
-function applyTrade(state: AgentState, give: Resource, receive: Resource, amount: number) {
+function applyTrade(state: AgentState, give: 'energy' | 'metal' | 'data', receive: 'energy' | 'metal' | 'data', amount: number) {
   const a = clamp(amount, 1, 10);
   if (state.wallet[give] >= a) {
     state.wallet[give] -= a;
@@ -54,19 +53,27 @@ function defaultFairnessAudit(): MatchFairnessAudit {
   return {
     sandboxParityRequired: false,
     sandboxParityEnforced: false,
-    sandboxParityPassed: true
+    sandboxParityPassed: true,
+    eigenTurnProofRequired: false,
+    eigenTurnProofPassed: true,
+    collusionCheckRequired: false,
+    collusionCheckPassed: true,
+    strictVerified: false
   };
 }
 
 function createAudit(fairness: MatchFairnessAudit): MatchAuditRecord {
   return {
-    fairness,
+    fairness: structuredClone(fairness),
+    meteringPolicy: currentMeteringPolicy(),
     meteringTotals: {
       requestBytes: 0,
       responseBytes: 0,
       timeouts: 0,
       fallbackHolds: 0,
-      invalidActions: 0
+      invalidActions: 0,
+      policyViolations: 0,
+      eigenProofFailures: 0
     }
   };
 }
@@ -80,6 +87,41 @@ function addToMeteringTotals(audit: MatchAuditRecord, replayTurn: MatchReplayTur
     if (item.timedOut) audit.meteringTotals.timeouts += 1;
     if (item.fallbackHold) audit.meteringTotals.fallbackHolds += 1;
     if (item.invalidAction) audit.meteringTotals.invalidActions += 1;
+    if (item.policyViolation) audit.meteringTotals.policyViolations += 1;
+    if (item.enforcement.eigenProof && item.eigenProofVerified !== true) {
+      audit.meteringTotals.eigenProofFailures += 1;
+    }
+  }
+}
+
+function expectedEigenProofForAgent(fairness: MatchFairnessAudit, agentId: string) {
+  if (!fairness.eigenTurnProofRequired) return undefined;
+
+  const profile = fairness.eigenComputeProfiles?.[agentId];
+  if (!profile?.appId) return undefined;
+
+  return {
+    required: true,
+    appId: profile.appId,
+    environment: profile.environment,
+    imageDigest: profile.imageDigest,
+    signerAddress: profile.signerAddress
+  };
+}
+
+function finalizeFairnessFromRuntime(audit: MatchAuditRecord) {
+  if (audit.fairness.eigenTurnProofRequired) {
+    const passed = audit.meteringTotals.eigenProofFailures === 0;
+    audit.fairness.eigenTurnProofPassed = passed;
+    if (!passed) {
+      audit.fairness.strictVerified = false;
+      audit.fairness.rejectionReason = audit.fairness.rejectionReason || 'eigen_turn_proof_failed';
+    }
+  }
+
+  if (audit.fairness.collusionCheckRequired && audit.fairness.collusionCheckPassed !== true) {
+    audit.fairness.strictVerified = false;
+    audit.fairness.rejectionReason = audit.fairness.rejectionReason || 'collusion_risk_detected';
   }
 }
 
@@ -112,19 +154,23 @@ export async function runMatch(input: {
     const [aResult, bResult] = await Promise.all([
       requestActionMetered({
         agent: aProf,
+        matchId: input.id,
         turn,
         self: structuredClone(a),
         opponent: structuredClone(b),
         config: input.config,
-        sandboxParityEnforced: fairness.sandboxParityEnforced
+        sandboxParityEnforced: fairness.sandboxParityEnforced,
+        expectedEigenProof: expectedEigenProofForAgent(fairness, aProf.id)
       }),
       requestActionMetered({
         agent: bProf,
+        matchId: input.id,
         turn,
         self: structuredClone(b),
         opponent: structuredClone(a),
         config: input.config,
-        sandboxParityEnforced: fairness.sandboxParityEnforced
+        sandboxParityEnforced: fairness.sandboxParityEnforced,
+        expectedEigenProof: expectedEigenProofForAgent(fairness, bProf.id)
       })
     ]);
 
@@ -154,6 +200,8 @@ export async function runMatch(input: {
     record.turnsPlayed = turn;
     if (a.hp <= 0 || b.hp <= 0) break;
   }
+
+  finalizeFairnessFromRuntime(audit);
 
   record.winner = winner(a, b);
   record.status = 'finished';

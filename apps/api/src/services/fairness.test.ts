@@ -64,7 +64,7 @@ describe('eigencompute parity', () => {
     const result = checkEigenComputeParity([
       agent({ id: 'a1' }),
       agent({ id: 'a2' })
-    ], true);
+    ], { required: true });
 
     expect(result.passed).toBe(false);
     expect(result.reason).toBe('missing_eigencompute_profiles');
@@ -72,9 +72,9 @@ describe('eigencompute parity', () => {
 
   it('passes with valid metadata', () => {
     const result = checkEigenComputeParity([
-      agent({ id: 'a1', eigencompute: { appId: '0x1111111111111111111111111111111111111111', environment: 'sepolia' } }),
-      agent({ id: 'a2', eigencompute: { appId: '0x2222222222222222222222222222222222222222', environment: 'sepolia' } })
-    ], true);
+      agent({ id: 'a1', eigencompute: { appId: '0x1111111111111111111111111111111111111111', environment: 'sepolia', imageDigest: 'sha256:aaa', signerAddress: '0x1111111111111111111111111111111111111112' } }),
+      agent({ id: 'a2', eigencompute: { appId: '0x2222222222222222222222222222222222222222', environment: 'sepolia', imageDigest: 'sha256:aaa', signerAddress: '0x2222222222222222222222222222222222222223' } })
+    ], { required: true });
 
     expect(result.passed).toBe(true);
   });
@@ -104,12 +104,22 @@ describe('strict sandbox policy', () => {
         agent({
           id: 'a1',
           sandbox: { runtime: 'node', version: '20.11', cpu: 2, memory: 2048 },
-          eigencompute: { appId: '0x1111111111111111111111111111111111111111', environment: 'sepolia' }
+          eigencompute: {
+            appId: '0x1111111111111111111111111111111111111111',
+            environment: 'sepolia',
+            imageDigest: 'sha256:matchdigest',
+            signerAddress: '0x1111111111111111111111111111111111111112'
+          }
         }),
         agent({
           id: 'a2',
           sandbox: { runtime: 'node', version: '20.11', cpu: 2, memory: 2048 },
-          eigencompute: { appId: '0x2222222222222222222222222222222222222222', environment: 'sepolia' }
+          eigencompute: {
+            appId: '0x2222222222222222222222222222222222222222',
+            environment: 'sepolia',
+            imageDigest: 'sha256:matchdigest',
+            signerAddress: '0x2222222222222222222222222222222222222223'
+          }
         })
       ],
       executionMode: 'endpoint',

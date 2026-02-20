@@ -13,12 +13,18 @@ function signerPrivateKey(): string | undefined {
 function payloadForMatch(match: MatchRecord): MatchAttestationPayload {
   const fairness = match.audit?.fairness;
   const executionMode = fairness?.executionMode ?? 'unknown';
+  const signerProfiles = Object.values(fairness?.eigenComputeProfiles || {});
+
   const strictVerified =
     fairness?.strictVerified === true &&
     fairness.executionMode === 'endpoint' &&
     (!fairness.endpointExecutionRequired || fairness.endpointExecutionPassed === true) &&
     (!fairness.sandboxParityEnforced || fairness.sandboxParityPassed === true) &&
-    (!fairness.eigenComputeEnforced || fairness.eigenComputePassed === true);
+    (!fairness.eigenComputeEnforced || fairness.eigenComputePassed === true) &&
+    (!fairness.independentAgentsRequired || fairness.independentAgentsPassed === true) &&
+    (!fairness.collusionCheckRequired || fairness.collusionCheckPassed === true) &&
+    (!fairness.eigenTurnProofRequired || fairness.eigenTurnProofPassed === true) &&
+    (!fairness.eigenSignerRequired || (signerProfiles.length > 0 && signerProfiles.every((profile) => Boolean(profile.signerAddress))));
 
   return {
     matchId: match.id,

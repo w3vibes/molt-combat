@@ -41,7 +41,15 @@ export type VerificationResponse = {
       requireEndpointMode: boolean;
       requireSandboxParity: boolean;
       requireEigenCompute: boolean;
+      requireIndependentAgents?: boolean;
+      requireAntiCollusion?: boolean;
+      requireEigenComputeEnvironment?: boolean;
+      requireEigenComputeImageDigest?: boolean;
+      requireEigenSigner?: boolean;
+      requireEigenTurnProof?: boolean;
       allowSimpleMode: boolean;
+      meteringPolicy?: JsonObject;
+      collusionPolicy?: JsonObject;
     };
   };
 };
@@ -71,6 +79,13 @@ export type HealthResponse = {
 };
 
 export type JsonObject = Record<string, unknown>;
+
+export type ApiCatalogItem = {
+  method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE' | 'HEAD' | 'OPTIONS';
+  backendPath: string;
+  frontendPath: string;
+  note?: string;
+};
 
 const paths = {
   // common read routes used by UI
@@ -102,6 +117,85 @@ function toFrontendPathFromBackendPath(backendPath: string): string {
 
   return `/api${normalized}`;
 }
+
+const BACKEND_ROUTE_DEFINITIONS: Array<Omit<ApiCatalogItem, 'frontendPath'>> = [
+  // System
+  { method: 'GET', backendPath: '/health' },
+  { method: 'GET', backendPath: '/metrics' },
+  { method: 'GET', backendPath: '/auth/status' },
+  { method: 'GET', backendPath: '/verification/eigencompute' },
+
+  // Install / skill
+  { method: 'GET', backendPath: '/skill.md' },
+  { method: 'GET', backendPath: '/install/invites' },
+  { method: 'POST', backendPath: '/install/invites' },
+  { method: 'POST', backendPath: '/install/register' },
+  { method: 'POST', backendPath: '/api/agents/register', note: 'legacy-compatible register path' },
+
+  // Agents
+  { method: 'GET', backendPath: '/agents' },
+  { method: 'GET', backendPath: '/agents/:id' },
+  { method: 'POST', backendPath: '/agents' },
+  { method: 'PATCH', backendPath: '/agents/:id' },
+  { method: 'DELETE', backendPath: '/agents/:id' },
+  { method: 'POST', backendPath: '/agents/:id/health' },
+
+  // Challenges
+  { method: 'GET', backendPath: '/challenges' },
+  { method: 'GET', backendPath: '/challenges/:id' },
+  { method: 'POST', backendPath: '/challenges' },
+  { method: 'POST', backendPath: '/challenges/:id/accept' },
+  { method: 'POST', backendPath: '/challenges/:id/escrow/prepare' },
+  { method: 'POST', backendPath: '/challenges/:id/payout/prepare' },
+  { method: 'POST', backendPath: '/challenges/:id/start' },
+  { method: 'POST', backendPath: '/challenges/:id/adjudicate' },
+  { method: 'POST', backendPath: '/challenges/:id/cancel' },
+  { method: 'POST', backendPath: '/challenges/:id/rounds/:turn/submit' },
+  { method: 'GET', backendPath: '/challenges/:id/state' },
+
+  // Matches
+  { method: 'GET', backendPath: '/matches' },
+  { method: 'GET', backendPath: '/matches/:id' },
+  { method: 'GET', backendPath: '/matches/:id/attestation' },
+  { method: 'POST', backendPath: '/matches' },
+  { method: 'POST', backendPath: '/matches/:id/fund' },
+  { method: 'POST', backendPath: '/matches/:id/payout' },
+  { method: 'POST', backendPath: '/matches/:id/escrow/create' },
+  { method: 'POST', backendPath: '/matches/:id/escrow/settle' },
+  { method: 'GET', backendPath: '/matches/:id/escrow/status' },
+  { method: 'GET', backendPath: '/matches/:id/payout/status' },
+
+  // Markets + leaderboard
+  { method: 'GET', backendPath: '/leaderboard/trusted' },
+  { method: 'GET', backendPath: '/markets' },
+  { method: 'GET', backendPath: '/markets/:id' },
+  { method: 'POST', backendPath: '/markets' },
+  { method: 'POST', backendPath: '/markets/:id/bets' },
+  { method: 'POST', backendPath: '/markets/:id/lock' },
+  { method: 'POST', backendPath: '/markets/:id/resolve' },
+  { method: 'POST', backendPath: '/markets/:id/cancel' },
+
+  // Seasons + tournaments
+  { method: 'GET', backendPath: '/seasons' },
+  { method: 'POST', backendPath: '/seasons' },
+  { method: 'PATCH', backendPath: '/seasons/:id' },
+  { method: 'GET', backendPath: '/tournaments' },
+  { method: 'GET', backendPath: '/tournaments/:id' },
+  { method: 'POST', backendPath: '/tournaments' },
+  { method: 'POST', backendPath: '/tournaments/:id/start' },
+  { method: 'POST', backendPath: '/tournaments/:id/sync' },
+
+  // Automation
+  { method: 'GET', backendPath: '/automation/status' },
+  { method: 'POST', backendPath: '/automation/tick' },
+  { method: 'POST', backendPath: '/automation/start' },
+  { method: 'POST', backendPath: '/automation/stop' }
+];
+
+export const API_CATALOG: ApiCatalogItem[] = BACKEND_ROUTE_DEFINITIONS.map((item) => ({
+  ...item,
+  frontendPath: toFrontendPathFromBackendPath(item.backendPath)
+}));
 
 function withQuery(path: string, query?: Record<string, string | number | boolean | undefined>): string {
   if (!query) return path;
@@ -269,6 +363,10 @@ export const frontendApi = {
     return requestBackendJson<JsonObject>(`/challenges/${encodeURIComponent(id)}/escrow/prepare`, jsonRequestInit('POST'));
   },
 
+  prepareChallengePayout(id: string) {
+    return requestBackendJson<JsonObject>(`/challenges/${encodeURIComponent(id)}/payout/prepare`, jsonRequestInit('POST'));
+  },
+
   startChallenge(id: string, payload?: JsonObject) {
     return requestBackendJson<JsonObject>(`/challenges/${encodeURIComponent(id)}/start`, jsonRequestInit('POST', payload));
   },
@@ -331,6 +429,12 @@ export const frontendApi = {
     );
   },
 
+  getMatchPayoutStatus(id: string, contractAddress: string) {
+    return requestBackendJson<JsonObject>(
+      withQuery(`/matches/${encodeURIComponent(id)}/payout/status`, { contractAddress })
+    );
+  },
+
   // ---- Markets ----
   listMarkets(query?: { status?: string; subjectType?: string; subjectId?: string }) {
     return requestBackendJson<JsonObject>(withQuery('/markets', query));
@@ -363,6 +467,39 @@ export const frontendApi = {
   // ---- Leaderboard ----
   getTrustedLeaderboard(limit = 200) {
     return requestJson<TrustedLeaderboardResponse>(`${paths.trustedLeaderboard}?limit=${limit}`);
+  },
+
+  // ---- Seasons / Tournaments ----
+  listSeasons(status?: string) {
+    return requestBackendJson<JsonObject>(withQuery('/seasons', { status }));
+  },
+
+  createSeason(payload: JsonObject) {
+    return requestBackendJson<JsonObject>('/seasons', jsonRequestInit('POST', payload));
+  },
+
+  updateSeason(id: string, payload: JsonObject) {
+    return requestBackendJson<JsonObject>(`/seasons/${encodeURIComponent(id)}`, jsonRequestInit('PATCH', payload));
+  },
+
+  listTournaments(query?: { status?: string; seasonId?: string }) {
+    return requestBackendJson<JsonObject>(withQuery('/tournaments', query));
+  },
+
+  getTournament(id: string) {
+    return requestBackendJson<JsonObject>(`/tournaments/${encodeURIComponent(id)}`);
+  },
+
+  createTournament(payload: JsonObject) {
+    return requestBackendJson<JsonObject>('/tournaments', jsonRequestInit('POST', payload));
+  },
+
+  startTournament(id: string, payload?: JsonObject) {
+    return requestBackendJson<JsonObject>(`/tournaments/${encodeURIComponent(id)}/start`, jsonRequestInit('POST', payload));
+  },
+
+  syncTournament(id: string, payload?: JsonObject) {
+    return requestBackendJson<JsonObject>(`/tournaments/${encodeURIComponent(id)}/sync`, jsonRequestInit('POST', payload));
   },
 
   // ---- Automation ----

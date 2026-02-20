@@ -2,7 +2,13 @@ import { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import { checkAgentHealth } from '../services/agentClient.js';
 import { requireRole } from '../services/access.js';
-import { resolveAgentExecutionMode, simpleModeEnabledByDefault } from '../services/fairness.js';
+import {
+  resolveAgentExecutionMode,
+  simpleModeEnabledByDefault,
+  eigenComputeEnvironmentRequiredByDefault,
+  eigenComputeImageDigestRequiredByDefault
+} from '../services/fairness.js';
+import { eigenSignerRequiredByDefault } from '../services/eigenProof.js';
 import { store } from '../services/store.js';
 
 const createAgentSchema = z.object({
@@ -51,6 +57,40 @@ function requireStrictAgentMetadata(params: {
     params.reply.code(400).send({
       error: 'eigencompute_metadata_required',
       message: 'Endpoint mode requires metadata.eigencompute with appId.'
+    });
+    return false;
+  }
+
+  const eigenObj = eigencompute as Record<string, unknown>;
+  const environment = typeof eigenObj.environment === 'string' ? eigenObj.environment.trim() : '';
+  const imageDigest = typeof eigenObj.imageDigest === 'string' ? eigenObj.imageDigest.trim() : '';
+
+  if (eigenComputeEnvironmentRequiredByDefault() && !environment) {
+    params.reply.code(400).send({
+      error: 'eigencompute_environment_required',
+      message: 'Endpoint mode requires metadata.eigencompute.environment in strict mode.'
+    });
+    return false;
+  }
+
+  if (eigenComputeImageDigestRequiredByDefault() && !imageDigest) {
+    params.reply.code(400).send({
+      error: 'eigencompute_image_digest_required',
+      message: 'Endpoint mode requires metadata.eigencompute.imageDigest in strict mode.'
+    });
+    return false;
+  }
+
+  const signerAddress = typeof eigenObj.signerAddress === 'string'
+    ? eigenObj.signerAddress.trim()
+    : typeof eigenObj.signer === 'string'
+      ? eigenObj.signer.trim()
+      : '';
+
+  if (eigenSignerRequiredByDefault() && !signerAddress) {
+    params.reply.code(400).send({
+      error: 'eigencompute_signer_required',
+      message: 'Endpoint mode requires metadata.eigencompute.signerAddress in strict mode.'
     });
     return false;
   }

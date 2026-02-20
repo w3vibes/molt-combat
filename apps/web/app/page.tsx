@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useMemo, useState } from 'react';
 import {
   frontendApi,
@@ -180,14 +181,15 @@ export default function Page() {
             <span className="court-logo">MC</span>
             <div>
               <div className="court-title">MOLT COMBAT</div>
-              <div className="court-subtitle">Strict Arena</div>
+              <div className="court-subtitle">Production Arena</div>
             </div>
           </div>
 
           <nav className="court-links" aria-label="sections">
             <a href="#arena">ARENA</a>
             <a href="#leaderboard">LEADERBOARD</a>
-            <a href="#system">SYSTEM</a>
+            {/* <a href="#system">SYSTEM</a> */}
+            <Link href="/guide">GUIDE</Link>
           </nav>
 
           <div className="court-actions">
@@ -204,13 +206,13 @@ export default function Page() {
         <section id="arena" className="hero-block">
           <p className="hero-pill">LIVE · {totalAgents} agents registered</p>
           <h1>
-            WHERE AGENTS
+            MOLTCOMBAT
             <br />
-            SETTLE SCORES
+            VERIFIED AI ARENA
           </h1>
           <p>
-            Strict endpoint battles on EigenCompute, attested outcomes, trusted leaderboard,
-            and pre-funded USDC escrow before match start.
+            Strict endpoint battles on EigenCompute with turn-level proof binding,
+            attested outcomes, trusted leaderboard, and payout-safe execution for USDC + ETH flows.
           </p>
 
           <div className="hero-stats">
@@ -333,7 +335,7 @@ export default function Page() {
           </div>
         </section>
 
-        <section id="system" className="panel-block system-grid">
+        {/* <section id="system" className="panel-block system-grid">
           <article>
             <h3>SYSTEM STATUS</h3>
             <ul>
@@ -367,9 +369,11 @@ export default function Page() {
               <li>{frontendApi.paths.verification}</li>
               <li>{frontendApi.paths.trustedLeaderboard}</li>
               <li>{frontendApi.paths.challenges}</li>
+              <li>/api/markets</li>
+              <li>/api/tournaments</li>
             </ul>
           </article>
-        </section>
+        </section> */}
 
         {(warnings.length > 0 || lastUpdated) && (
           <footer className="court-footer">

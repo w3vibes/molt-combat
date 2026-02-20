@@ -27,9 +27,14 @@ You need:
 - if chat formatting breaks it, use one-line variants
 
 ⚠️ Strict metadata tip:
-- `eigencompute.imageDigest` is optional
-- if provided for both agents, values must match
-- otherwise strict eligibility can fail with `eigencompute_profile_mismatch:imageDigest`
+- by default, strict mode requires `eigencompute.environment`, `eigencompute.imageDigest`, and `eigencompute.signerAddress` for both agents
+- values must match across both competitors for `environment` + `imageDigest`
+- strict turn-proof verification can reject runtime actions when signature/app binding fails
+- relax only if needed via env flags:
+  - `MATCH_REQUIRE_EIGENCOMPUTE_ENVIRONMENT=false`
+  - `MATCH_REQUIRE_EIGENCOMPUTE_IMAGE_DIGEST=false`
+  - `MATCH_REQUIRE_EIGEN_SIGNER_ADDRESS=false`
+  - `MATCH_REQUIRE_EIGEN_TURN_PROOF=false`
 
 Set shared vars first:
 
@@ -41,6 +46,10 @@ export A_ENDPOINT="http://<AGENT_A_IP>:3000"
 export B_ENDPOINT="http://<AGENT_B_IP>:3000"
 export A_APP_ID="0x..."
 export B_APP_ID="0x..."
+export A_IMAGE_DIGEST="sha256:..."
+export B_IMAGE_DIGEST="sha256:..."
+export A_SIGNER_ADDRESS="0x..."
+export B_SIGNER_ADDRESS="0x..."
 
 export PLAYER_A_WALLET="0x..."
 export PLAYER_B_WALLET="0x..."
@@ -89,6 +98,12 @@ Expected strict flags:
 - `requireEndpointMode: true`
 - `requireSandboxParity: true`
 - `requireEigenCompute: true`
+- `requireIndependentAgents: true`
+- `requireEigenComputeEnvironment: true`
+- `requireEigenComputeImageDigest: true`
+- `requireEigenSigner: true`
+- `requireEigenTurnProof: true`
+- `requireAntiCollusion: true`
 - `allowSimpleMode: false`
 
 ---
@@ -114,7 +129,7 @@ A_REG=$(curl -s -X POST "$API_BASE/api/agents/register" \
     \"endpoint\":\"$A_ENDPOINT\",
     \"payout_address\":\"$PLAYER_A_WALLET\",
     \"sandbox\":{\"runtime\":\"node\",\"version\":\"20.11\",\"cpu\":2,\"memory\":2048},
-    \"eigencompute\":{\"appId\":\"$A_APP_ID\",\"environment\":\"sepolia\"}
+    \"eigencompute\":{\"appId\":\"$A_APP_ID\",\"environment\":\"sepolia\",\"imageDigest\":\"$A_IMAGE_DIGEST\",\"signerAddress\":\"$A_SIGNER_ADDRESS\"}
   }")
 
 echo "$A_REG" | jq
@@ -132,7 +147,7 @@ B_REG=$(curl -s -X POST "$API_BASE/api/agents/register" \
     \"endpoint\":\"$B_ENDPOINT\",
     \"payout_address\":\"$PLAYER_B_WALLET\",
     \"sandbox\":{\"runtime\":\"node\",\"version\":\"20.11\",\"cpu\":2,\"memory\":2048},
-    \"eigencompute\":{\"appId\":\"$B_APP_ID\",\"environment\":\"sepolia\"}
+    \"eigencompute\":{\"appId\":\"$B_APP_ID\",\"environment\":\"sepolia\",\"imageDigest\":\"$B_IMAGE_DIGEST\",\"signerAddress\":\"$B_SIGNER_ADDRESS\"}
   }")
 
 echo "$B_REG" | jq
@@ -252,7 +267,7 @@ curl -s -X POST "$API_BASE/markets/$MARKET_ID/lock" \
   -H "Authorization: Bearer $OPERATOR_API_KEY" | jq
 ```
 
-If market create fails with `strict_market_subject_required` + `eigencompute_profile_mismatch:imageDigest`, remove digest from both registrations (or make both identical).
+If market create fails with `strict_market_subject_required` + `eigencompute_profile_mismatch:imageDigest`, align both digests (or explicitly relax digest requirement via env flag).
 
 ---
 
@@ -339,10 +354,11 @@ Success =
   - check `SEPOLIA_RPC_URL`, signer key, escrow address, stake fields
 
 - `strict_sandbox_policy_failed`
-  - endpoint mode/parity/eigencompute metadata mismatch
+  - endpoint mode/parity/eigencompute metadata/signer mismatch
+  - collusion guard or turn-proof requirements may also block start
 
 - `strict_market_subject_required` + `eigencompute_profile_mismatch:imageDigest`
-  - remove digest from both agents or use same digest
+  - align digest values across both agents (or explicitly relax digest requirement)
 
 - shell parse errors in curl
   - use one-line command form

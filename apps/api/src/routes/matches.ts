@@ -3,16 +3,23 @@ import { z } from 'zod';
 import { runMatch } from '../engine/combatEngine.js';
 import { toMatchIdHex } from '../utils/ids.js';
 import { requireRole, resolveAccessRole, authSummary } from '../services/access.js';
-import { fundOnSepolia, payoutOnSepolia } from '../services/payout.js';
+import { fundOnSepolia, getPrizePoolMatchStatus, payoutOnSepolia } from '../services/payout.js';
 import { createEscrowMatch, getEscrowMatchStatus, settleEscrowMatch } from '../services/escrow.js';
 import { signMatchAttestation, verifyMatchAttestation } from '../services/attestation.js';
+import { currentMeteringPolicy } from '../services/agentClient.js';
 import { autoResolveMarketsForMatch } from '../services/markets.js';
 import {
   endpointExecutionRequiredByDefault,
   evaluateStrictSandboxPolicy,
   sandboxParityRequiredByDefault,
-  toMatchFairnessAudit
+  toMatchFairnessAudit,
+  independentAgentsRequiredByDefault,
+  eigenComputeEnvironmentRequiredByDefault,
+  eigenComputeImageDigestRequiredByDefault,
+  antiCollusionRequiredByDefault
 } from '../services/fairness.js';
+import { eigenSignerRequiredByDefault, eigenTurnProofRequiredByDefault } from '../services/eigenProof.js';
+import { collusionPolicyConfig, evaluateHeadToHeadCollusionRisk } from '../services/collusion.js';
 import { RegisteredAgent, store } from '../services/store.js';
 import { MatchFairnessAudit } from '../types/domain.js';
 
@@ -162,11 +169,21 @@ export async function matchRoutes(app: FastifyInstance) {
       });
     }
 
+    const collusionRisk = evaluateHeadToHeadCollusionRisk({
+      agentAId: resolved.registryAgents[0].id,
+      agentBId: resolved.registryAgents[1].id,
+      matches: store.listMatches(),
+      required: antiCollusionRequiredByDefault()
+    });
+
     const strictPolicy = evaluateStrictSandboxPolicy({
       agents: resolved.registryAgents,
       executionMode: 'endpoint',
       requireParity: sandboxParityRequiredByDefault(),
-      endpointModeRequired: endpointExecutionRequiredByDefault()
+      endpointModeRequired: endpointExecutionRequiredByDefault(),
+      requireEigenSigner: eigenSignerRequiredByDefault(),
+      requireEigenTurnProof: eigenTurnProofRequiredByDefault(),
+      collusionRisk
     });
 
     const fairness: MatchFairnessAudit = toMatchFairnessAudit(strictPolicy);
@@ -180,7 +197,10 @@ export async function matchRoutes(app: FastifyInstance) {
           endpointModeRequired: strictPolicy.endpointModeRequired,
           endpointModePassed: strictPolicy.endpointModePassed,
           parity: strictPolicy.parity,
-          eigenCompute: strictPolicy.eigenCompute
+          eigenCompute: strictPolicy.eigenCompute,
+          eigenTurnProof: strictPolicy.eigenTurnProof,
+          independence: strictPolicy.independence,
+          collusion: strictPolicy.collusion
         }
       });
     }
@@ -344,6 +364,30 @@ export async function matchRoutes(app: FastifyInstance) {
     };
   });
 
+  app.get('/matches/:id/payout/status', async (req, reply) => {
+    if (!requireRole(req, reply, 'readonly')) return;
+
+    const id = (req.params as { id: string }).id;
+    const parsed = parseOrReply(z.object({ contractAddress: z.string() }), req.query, reply);
+    if (!parsed) return;
+
+    if (!process.env.SEPOLIA_RPC_URL) return reply.code(400).send({ error: 'missing_chain_config' });
+
+    const status = await getPrizePoolMatchStatus({
+      rpcUrl: process.env.SEPOLIA_RPC_URL,
+      contractAddress: parsed.contractAddress,
+      matchIdHex: toMatchIdHex(id)
+    });
+
+    return {
+      ok: true,
+      matchId: id,
+      matchIdHex: toMatchIdHex(id),
+      contractAddress: parsed.contractAddress,
+      ...status
+    };
+  });
+
   app.get('/verification/eigencompute', async (req, reply) => {
     if (!requireRole(req, reply, 'readonly')) return;
 
@@ -378,7 +422,15 @@ export async function matchRoutes(app: FastifyInstance) {
           requireEndpointMode: endpointExecutionRequiredByDefault(),
           requireSandboxParity: sandboxParityRequiredByDefault(),
           requireEigenCompute: process.env.MATCH_REQUIRE_EIGENCOMPUTE !== 'false',
-          allowSimpleMode: process.env.MATCH_ALLOW_SIMPLE_MODE === 'true'
+          requireIndependentAgents: independentAgentsRequiredByDefault(),
+          requireAntiCollusion: antiCollusionRequiredByDefault(),
+          requireEigenComputeEnvironment: eigenComputeEnvironmentRequiredByDefault(),
+          requireEigenComputeImageDigest: eigenComputeImageDigestRequiredByDefault(),
+          requireEigenSigner: eigenSignerRequiredByDefault(),
+          requireEigenTurnProof: eigenTurnProofRequiredByDefault(),
+          allowSimpleMode: process.env.MATCH_ALLOW_SIMPLE_MODE === 'true',
+          meteringPolicy: currentMeteringPolicy(),
+          collusionPolicy: collusionPolicyConfig()
         }
       }
     };

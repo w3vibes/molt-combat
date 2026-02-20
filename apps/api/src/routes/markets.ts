@@ -3,11 +3,14 @@ import { z } from 'zod';
 import { requireRole } from '../services/access.js';
 import { verifyMatchAttestation } from '../services/attestation.js';
 import {
+  antiCollusionRequiredByDefault,
   endpointExecutionRequiredByDefault,
   evaluateStrictSandboxPolicy,
   isStrictSandboxMatch,
   resolveAgentExecutionMode
 } from '../services/fairness.js';
+import { eigenSignerRequiredByDefault, eigenTurnProofRequiredByDefault } from '../services/eigenProof.js';
+import { evaluateHeadToHeadCollusionRisk } from '../services/collusion.js';
 import { assertMarketBetInput, resolveMarketByOutcome } from '../services/markets.js';
 import { store } from '../services/store.js';
 
@@ -59,10 +62,20 @@ function validateChallengeStrictEligibility(challengeId: string): { ok: boolean;
       ? 'simple'
       : 'endpoint';
 
+  const collusionRisk = evaluateHeadToHeadCollusionRisk({
+    agentAId: challenger.id,
+    agentBId: opponent.id,
+    matches: store.listMatches(),
+    required: antiCollusionRequiredByDefault()
+  });
+
   const policy = evaluateStrictSandboxPolicy({
     agents: [challenger, opponent],
     executionMode,
-    endpointModeRequired: endpointExecutionRequiredByDefault()
+    endpointModeRequired: endpointExecutionRequiredByDefault(),
+    requireEigenSigner: eigenSignerRequiredByDefault(),
+    requireEigenTurnProof: eigenTurnProofRequiredByDefault(),
+    collusionRisk
   });
 
   if (!policy.passed) {

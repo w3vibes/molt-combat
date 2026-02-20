@@ -1,12 +1,14 @@
 import { ChallengeRecord } from '../types/domain.js';
 import { toMatchIdHex } from '../utils/ids.js';
 import { getEscrowMatchStatus, settleEscrowMatch } from './escrow.js';
+import { getPrizePoolMatchStatus, payoutOnSepolia } from './payout.js';
 import { store } from './store.js';
 
 export type EscrowAutomationAction = {
   challengeId: string;
   matchId: string;
-  action: 'settled' | 'pending_deposits' | 'already_settled' | 'skipped' | 'error';
+  mode: 'usdc' | 'eth';
+  action: 'settled' | 'pending_deposits' | 'pending_funding' | 'already_settled' | 'skipped' | 'error';
   reason?: string;
   txHash?: string;
 };
@@ -51,26 +53,30 @@ function toLower(value: string | undefined): string {
 }
 
 function winnerWallet(challenge: ChallengeRecord): string | null {
-  if (challenge.stake.mode !== 'usdc') return null;
+  if (!challenge.winnerAgentId) return null;
 
-  const playerA = challenge.stake.playerA;
-  const playerB = challenge.stake.playerB;
-  if (!playerA || !playerB || !challenge.winnerAgentId) return null;
+  if (challenge.stake.mode === 'usdc') {
+    const playerA = challenge.stake.playerA;
+    const playerB = challenge.stake.playerB;
 
-  const winnerAgent = store.getAgent(challenge.winnerAgentId);
-  const winnerAddress = winnerAgent?.payoutAddress;
+    if (playerA && playerB) {
+      const winnerAgent = store.getAgent(challenge.winnerAgentId);
+      const winnerAddress = winnerAgent?.payoutAddress;
 
-  if (winnerAddress) {
-    const lowered = toLower(winnerAddress);
-    if (lowered === toLower(playerA) || lowered === toLower(playerB)) {
-      return winnerAddress;
+      if (winnerAddress) {
+        const lowered = toLower(winnerAddress);
+        if (lowered === toLower(playerA) || lowered === toLower(playerB)) {
+          return winnerAddress;
+        }
+      }
+
+      if (challenge.winnerAgentId === challenge.challengerAgentId) return playerA;
+      if (challenge.winnerAgentId === challenge.opponentAgentId) return playerB;
     }
   }
 
-  if (challenge.winnerAgentId === challenge.challengerAgentId) return playerA;
-  if (challenge.winnerAgentId === challenge.opponentAgentId) return playerB;
-
-  return null;
+  const winnerAgent = store.getAgent(challenge.winnerAgentId);
+  return winnerAgent?.payoutAddress || null;
 }
 
 function settlementCandidates(): ChallengeRecord[] {
@@ -78,7 +84,7 @@ function settlementCandidates(): ChallengeRecord[] {
     .listChallenges('completed')
     .filter(
       (challenge) =>
-        challenge.stake.mode === 'usdc' &&
+        (challenge.stake.mode === 'usdc' || challenge.stake.mode === 'eth') &&
         Boolean(challenge.matchId) &&
         Boolean(challenge.winnerAgentId)
     );
@@ -99,10 +105,11 @@ export async function runEscrowSettlementTick(source = 'manual'): Promise<Escrow
 
     if (!chainRpc || !key) {
       for (const challenge of candidates) {
-        if (!challenge.matchId) continue;
+        if (!challenge.matchId || (challenge.stake.mode !== 'usdc' && challenge.stake.mode !== 'eth')) continue;
         actions.push({
           challengeId: challenge.id,
           matchId: challenge.matchId,
+          mode: challenge.stake.mode,
           action: 'skipped',
           reason: 'missing_chain_config'
         });
@@ -119,7 +126,7 @@ export async function runEscrowSettlementTick(source = 'manual'): Promise<Escrow
       };
 
       store.recordAutomationRun({
-        automationType: 'escrow_settlement',
+        automationType: 'payout_settlement',
         status: 'ok',
         startedAt,
         finishedAt: summary.finishedAt,
@@ -131,13 +138,14 @@ export async function runEscrowSettlementTick(source = 'manual'): Promise<Escrow
     }
 
     for (const challenge of candidates) {
-      if (!challenge.matchId || challenge.stake.mode !== 'usdc') continue;
+      if (!challenge.matchId || (challenge.stake.mode !== 'usdc' && challenge.stake.mode !== 'eth')) continue;
       const contractAddress = challenge.stake.contractAddress;
 
       if (!contractAddress) {
         actions.push({
           challengeId: challenge.id,
           matchId: challenge.matchId,
+          mode: challenge.stake.mode,
           action: 'skipped',
           reason: 'missing_contract_address'
         });
@@ -149,6 +157,7 @@ export async function runEscrowSettlementTick(source = 'manual'): Promise<Escrow
         actions.push({
           challengeId: challenge.id,
           matchId: challenge.matchId,
+          mode: challenge.stake.mode,
           action: 'error',
           reason: 'winner_wallet_unresolved'
         });
@@ -157,31 +166,89 @@ export async function runEscrowSettlementTick(source = 'manual'): Promise<Escrow
       }
 
       try {
-        const status = await getEscrowMatchStatus({
+        if (challenge.stake.mode === 'usdc') {
+          const status = await getEscrowMatchStatus({
+            rpcUrl: chainRpc,
+            contractAddress,
+            matchIdHex: toMatchIdHex(challenge.matchId)
+          });
+
+          if (status.settled) {
+            actions.push({
+              challengeId: challenge.id,
+              matchId: challenge.matchId,
+              mode: 'usdc',
+              action: 'already_settled'
+            });
+            continue;
+          }
+
+          if (!status.playerADeposited || !status.playerBDeposited) {
+            actions.push({
+              challengeId: challenge.id,
+              matchId: challenge.matchId,
+              mode: 'usdc',
+              action: 'pending_deposits'
+            });
+            continue;
+          }
+
+          const receipt = await settleEscrowMatch({
+            rpcUrl: chainRpc,
+            privateKey: key,
+            contractAddress,
+            matchIdHex: toMatchIdHex(challenge.matchId),
+            winner
+          });
+
+          settled += 1;
+          const txHash = receipt?.hash ?? undefined;
+
+          actions.push({
+            challengeId: challenge.id,
+            matchId: challenge.matchId,
+            mode: 'usdc',
+            action: 'settled',
+            txHash
+          });
+
+          store.patchChallenge(challenge.id, {
+            notes: appendNote(
+              challenge.notes,
+              `automation_settled_usdc:${new Date().toISOString()}:${txHash || 'tx_unknown'}`
+            )
+          });
+
+          continue;
+        }
+
+        const status = await getPrizePoolMatchStatus({
           rpcUrl: chainRpc,
           contractAddress,
           matchIdHex: toMatchIdHex(challenge.matchId)
         });
 
-        if (status.settled) {
+        if (status.paid) {
           actions.push({
             challengeId: challenge.id,
             matchId: challenge.matchId,
+            mode: 'eth',
             action: 'already_settled'
           });
           continue;
         }
 
-        if (!status.playerADeposited || !status.playerBDeposited) {
+        if (status.fundedAmountWei === '0') {
           actions.push({
             challengeId: challenge.id,
             matchId: challenge.matchId,
-            action: 'pending_deposits'
+            mode: 'eth',
+            action: 'pending_funding'
           });
           continue;
         }
 
-        const receipt = await settleEscrowMatch({
+        const receipt = await payoutOnSepolia({
           rpcUrl: chainRpc,
           privateKey: key,
           contractAddress,
@@ -195,6 +262,7 @@ export async function runEscrowSettlementTick(source = 'manual'): Promise<Escrow
         actions.push({
           challengeId: challenge.id,
           matchId: challenge.matchId,
+          mode: 'eth',
           action: 'settled',
           txHash
         });
@@ -202,7 +270,7 @@ export async function runEscrowSettlementTick(source = 'manual'): Promise<Escrow
         store.patchChallenge(challenge.id, {
           notes: appendNote(
             challenge.notes,
-            `automation_settled:${new Date().toISOString()}:${txHash || 'tx_unknown'}`
+            `automation_settled_eth:${new Date().toISOString()}:${txHash || 'tx_unknown'}`
           )
         });
       } catch (error) {
@@ -210,8 +278,9 @@ export async function runEscrowSettlementTick(source = 'manual'): Promise<Escrow
         actions.push({
           challengeId: challenge.id,
           matchId: challenge.matchId,
+          mode: challenge.stake.mode,
           action: 'error',
-          reason: error instanceof Error ? error.message : 'escrow_automation_error'
+          reason: error instanceof Error ? error.message : 'payout_automation_error'
         });
       }
     }
@@ -228,7 +297,7 @@ export async function runEscrowSettlementTick(source = 'manual'): Promise<Escrow
     };
 
     store.recordAutomationRun({
-      automationType: 'escrow_settlement',
+      automationType: 'payout_settlement',
       status: errors > 0 ? 'error' : 'ok',
       startedAt,
       finishedAt,
@@ -280,6 +349,9 @@ export function escrowAutomationStatus() {
     inFlight: Boolean(inFlightTick),
     envEnabled: pollingEnabledByEnv(),
     lastTick,
-    recentRuns: store.listAutomationRuns('escrow_settlement', 10)
+    recentRuns: [
+      ...store.listAutomationRuns('payout_settlement', 10),
+      ...store.listAutomationRuns('escrow_settlement', 10)
+    ].sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt)).slice(0, 10)
   };
 }

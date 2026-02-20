@@ -10,6 +10,7 @@ import { installRoutes } from './routes/install.js';
 import { marketRoutes } from './routes/markets.js';
 import { leaderboardRoutes } from './routes/leaderboard.js';
 import { automationRoutes } from './routes/automation.js';
+import { tournamentRoutes } from './routes/tournaments.js';
 import {
   maybeStartEscrowSettlementPolling,
   stopEscrowSettlementPolling
@@ -52,6 +53,7 @@ await app.register(installRoutes);
 await app.register(marketRoutes);
 await app.register(leaderboardRoutes);
 await app.register(automationRoutes);
+await app.register(tournamentRoutes);
 
 app.get('/health', { config: { rateLimit: false } }, async () => ({ ok: true }));
 

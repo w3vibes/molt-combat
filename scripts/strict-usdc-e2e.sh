@@ -49,6 +49,10 @@ A_ENDPOINT="${A_ENDPOINT:-${AGENT_A_ENDPOINT:-}}"
 B_ENDPOINT="${B_ENDPOINT:-${AGENT_B_ENDPOINT:-}}"
 A_APP_ID="${A_APP_ID:-${ECLOUD_APP_ID_AGENT_A:-}}"
 B_APP_ID="${B_APP_ID:-${ECLOUD_APP_ID_AGENT_B:-}}"
+A_IMAGE_DIGEST="${A_IMAGE_DIGEST:-${AGENT_A_IMAGE_DIGEST:-}}"
+B_IMAGE_DIGEST="${B_IMAGE_DIGEST:-${AGENT_B_IMAGE_DIGEST:-}}"
+A_SIGNER_ADDRESS="${A_SIGNER_ADDRESS:-${AGENT_A_SIGNER_ADDRESS:-}}"
+B_SIGNER_ADDRESS="${B_SIGNER_ADDRESS:-${AGENT_B_SIGNER_ADDRESS:-}}"
 
 # Required inputs
 for v in \
@@ -58,6 +62,10 @@ for v in \
   B_ENDPOINT \
   A_APP_ID \
   B_APP_ID \
+  A_IMAGE_DIGEST \
+  B_IMAGE_DIGEST \
+  A_SIGNER_ADDRESS \
+  B_SIGNER_ADDRESS \
   PLAYER_A_WALLET \
   PLAYER_B_WALLET \
   SEPOLIA_RPC_URL \
@@ -92,7 +100,7 @@ echo "$STRICT" | jq '.checks.strictMode'
 printf "\n== 2) Register Agent A ==\n"
 A_REG=$(curl -s -X POST "$API_BASE/api/agents/register" \
   -H "Content-Type: application/json" \
-  -d "{\"agent_name\":\"$A_NAME\",\"endpoint\":\"$A_ENDPOINT\",\"payout_address\":\"$PLAYER_A_WALLET\",\"sandbox\":{\"runtime\":\"$A_SANDBOX_RUNTIME\",\"version\":\"$A_SANDBOX_VERSION\",\"cpu\":$A_SANDBOX_CPU,\"memory\":$A_SANDBOX_MEMORY},\"eigencompute\":{\"appId\":\"$A_APP_ID\",\"environment\":\"sepolia\"}}")
+  -d "{\"agent_name\":\"$A_NAME\",\"endpoint\":\"$A_ENDPOINT\",\"payout_address\":\"$PLAYER_A_WALLET\",\"sandbox\":{\"runtime\":\"$A_SANDBOX_RUNTIME\",\"version\":\"$A_SANDBOX_VERSION\",\"cpu\":$A_SANDBOX_CPU,\"memory\":$A_SANDBOX_MEMORY},\"eigencompute\":{\"appId\":\"$A_APP_ID\",\"environment\":\"sepolia\",\"imageDigest\":\"$A_IMAGE_DIGEST\",\"signerAddress\":\"$A_SIGNER_ADDRESS\"}}")
 ensure_no_error "register A" "$A_REG"
 A_ID=$(json_field "$A_REG" '.agent_id')
 A_KEY=$(json_field "$A_REG" '.api_key')
@@ -101,7 +109,7 @@ echo "$A_REG" | jq '{agent_id, api_key}'
 printf "\n== 3) Register Agent B ==\n"
 B_REG=$(curl -s -X POST "$API_BASE/api/agents/register" \
   -H "Content-Type: application/json" \
-  -d "{\"agent_name\":\"$B_NAME\",\"endpoint\":\"$B_ENDPOINT\",\"payout_address\":\"$PLAYER_B_WALLET\",\"sandbox\":{\"runtime\":\"$B_SANDBOX_RUNTIME\",\"version\":\"$B_SANDBOX_VERSION\",\"cpu\":$B_SANDBOX_CPU,\"memory\":$B_SANDBOX_MEMORY},\"eigencompute\":{\"appId\":\"$B_APP_ID\",\"environment\":\"sepolia\"}}")
+  -d "{\"agent_name\":\"$B_NAME\",\"endpoint\":\"$B_ENDPOINT\",\"payout_address\":\"$PLAYER_B_WALLET\",\"sandbox\":{\"runtime\":\"$B_SANDBOX_RUNTIME\",\"version\":\"$B_SANDBOX_VERSION\",\"cpu\":$B_SANDBOX_CPU,\"memory\":$B_SANDBOX_MEMORY},\"eigencompute\":{\"appId\":\"$B_APP_ID\",\"environment\":\"sepolia\",\"imageDigest\":\"$B_IMAGE_DIGEST\",\"signerAddress\":\"$B_SIGNER_ADDRESS\"}}")
 ensure_no_error "register B" "$B_REG"
 B_ID=$(json_field "$B_REG" '.agent_id')
 B_KEY=$(json_field "$B_REG" '.api_key')
@@ -216,7 +224,7 @@ echo "$ESCROW_FINAL" | jq '{matchId, playerADeposited, playerBDeposited, settled
 
 LEADERBOARD=$(curl -s "$API_BASE/leaderboard/trusted")
 ensure_no_error "leaderboard" "$LEADERBOARD"
-echo "$LEADERBOARD" | jq '{strictOnly, entries: (.entries | length)}'
+echo "$LEADERBOARD" | jq '{strictOnly, entries: (.leaderboard | length), trustedMatchCount}'
 
 printf "\n✅ E2E complete\n"
 printf "Challenge: %s\n" "$CH_ID"

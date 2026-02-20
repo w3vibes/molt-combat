@@ -1,10 +1,12 @@
 import type {
   EigenComputeProfile,
+  MatchCollusionMetrics,
   MatchExecutionMode,
   MatchFairnessAudit,
   MatchRecord,
   SandboxProfile
 } from '../types/domain.js';
+import { eigenSignerRequiredByDefault, eigenTurnProofRequiredByDefault } from './eigenProof.js';
 import type { RegisteredAgent } from './store.js';
 
 export type SandboxParityResult = {
@@ -22,7 +24,34 @@ export type EigenComputeParityResult = {
   passed: boolean;
   reason?: string;
   profiles: Record<string, EigenComputeProfile>;
+  requireEnvironment: boolean;
+  requireImageDigest: boolean;
+  requireSigner: boolean;
   mismatchedFields?: Array<'environment' | 'imageDigest'>;
+};
+
+export type AgentIndependenceResult = {
+  required: boolean;
+  enforced: boolean;
+  passed: boolean;
+  reason?: string;
+  reasons: string[];
+};
+
+export type CollusionRiskResult = {
+  required: boolean;
+  enforced: boolean;
+  passed: boolean;
+  reason?: string;
+  reasons: string[];
+  metrics?: MatchCollusionMetrics;
+};
+
+export type EigenTurnProofPolicyResult = {
+  required: boolean;
+  signerRequired: boolean;
+  passed: boolean;
+  reason?: string;
 };
 
 export type StrictSandboxPolicyResult = {
@@ -34,6 +63,9 @@ export type StrictSandboxPolicyResult = {
   strictVerified: boolean;
   parity: SandboxParityResult;
   eigenCompute: EigenComputeParityResult;
+  eigenTurnProof: EigenTurnProofPolicyResult;
+  independence: AgentIndependenceResult;
+  collusion: CollusionRiskResult;
 };
 
 export function sandboxParityRequiredByDefault(): boolean {
@@ -46,6 +78,22 @@ export function endpointExecutionRequiredByDefault(): boolean {
 
 export function eigenComputeRequiredByDefault(): boolean {
   return process.env.MATCH_REQUIRE_EIGENCOMPUTE !== 'false';
+}
+
+export function eigenComputeEnvironmentRequiredByDefault(): boolean {
+  return process.env.MATCH_REQUIRE_EIGENCOMPUTE_ENVIRONMENT !== 'false';
+}
+
+export function eigenComputeImageDigestRequiredByDefault(): boolean {
+  return process.env.MATCH_REQUIRE_EIGENCOMPUTE_IMAGE_DIGEST !== 'false';
+}
+
+export function independentAgentsRequiredByDefault(): boolean {
+  return process.env.MATCH_REQUIRE_INDEPENDENT_AGENTS !== 'false';
+}
+
+export function antiCollusionRequiredByDefault(): boolean {
+  return process.env.MATCH_REQUIRE_ANTI_COLLUSION !== 'false';
 }
 
 export function simpleModeEnabledByDefault(): boolean {
@@ -85,6 +133,21 @@ function normalizeText(value: unknown): string | null {
 function normalizeTextLower(value: unknown): string | null {
   const normalized = normalizeText(value);
   return normalized ? normalized.toLowerCase() : null;
+}
+
+function normalizeAddress(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.toLowerCase();
+}
+
+function endpointHost(endpoint: string): string | null {
+  try {
+    return new URL(endpoint).host.toLowerCase();
+  } catch {
+    return null;
+  }
 }
 
 function validAppId(value: string): boolean {
@@ -129,10 +192,19 @@ export function extractEigenComputeProfile(agent: RegisteredAgent): EigenCompute
     eigen.enclave_measurement
   );
 
+  const signerAddress = normalizeAddress(
+    eigen.signerAddress ??
+    eigen.signer ??
+    eigen.evmAddress ??
+    metadata.ecloudSignerAddress ??
+    metadata.ecloud_signer_address
+  );
+
   return {
     appId,
     ...(environment ? { environment } : {}),
-    ...(imageDigest ? { imageDigest } : {})
+    ...(imageDigest ? { imageDigest } : {}),
+    ...(signerAddress ? { signerAddress } : {})
   };
 }
 
@@ -206,14 +278,27 @@ export function checkSandboxParity(
 
 export function checkEigenComputeParity(
   agents: RegisteredAgent[],
-  required = eigenComputeRequiredByDefault()
+  params?: {
+    required?: boolean;
+    requireEnvironment?: boolean;
+    requireImageDigest?: boolean;
+    requireSigner?: boolean;
+  }
 ): EigenComputeParityResult {
+  const required = params?.required ?? eigenComputeRequiredByDefault();
+  const requireEnvironment = params?.requireEnvironment ?? eigenComputeEnvironmentRequiredByDefault();
+  const requireImageDigest = params?.requireImageDigest ?? eigenComputeImageDigestRequiredByDefault();
+  const requireSigner = params?.requireSigner ?? eigenSignerRequiredByDefault();
+
   if (!required) {
     return {
       required: false,
       enforced: false,
       passed: true,
-      profiles: {}
+      profiles: {},
+      requireEnvironment,
+      requireImageDigest,
+      requireSigner
     };
   }
 
@@ -223,7 +308,10 @@ export function checkEigenComputeParity(
       enforced: true,
       passed: false,
       reason: 'exactly_two_agents_required',
-      profiles: {}
+      profiles: {},
+      requireEnvironment,
+      requireImageDigest,
+      requireSigner
     };
   }
 
@@ -244,7 +332,10 @@ export function checkEigenComputeParity(
       profiles: {
         ...(profileA ? { [a.id]: profileA } : {}),
         ...(profileB ? { [b.id]: profileB } : {})
-      }
+      },
+      requireEnvironment,
+      requireImageDigest,
+      requireSigner
     };
   }
 
@@ -257,7 +348,10 @@ export function checkEigenComputeParity(
       profiles: {
         [a.id]: profileA,
         [b.id]: profileB
-      }
+      },
+      requireEnvironment,
+      requireImageDigest,
+      requireSigner
     };
   }
 
@@ -270,8 +364,77 @@ export function checkEigenComputeParity(
       profiles: {
         [a.id]: profileA,
         [b.id]: profileB
-      }
+      },
+      requireEnvironment,
+      requireImageDigest,
+      requireSigner
     };
+  }
+
+  if (requireEnvironment) {
+    if (!profileA.environment || !profileB.environment) {
+      return {
+        required: true,
+        enforced: true,
+        passed: false,
+        reason: !profileA.environment && !profileB.environment
+          ? 'missing_eigencompute_environment_profiles'
+          : !profileA.environment
+            ? `missing_eigencompute_environment:${a.id}`
+            : `missing_eigencompute_environment:${b.id}`,
+        profiles: {
+          [a.id]: profileA,
+          [b.id]: profileB
+        },
+        requireEnvironment,
+        requireImageDigest,
+        requireSigner
+      };
+    }
+  }
+
+  if (requireImageDigest) {
+    if (!profileA.imageDigest || !profileB.imageDigest) {
+      return {
+        required: true,
+        enforced: true,
+        passed: false,
+        reason: !profileA.imageDigest && !profileB.imageDigest
+          ? 'missing_eigencompute_image_digest_profiles'
+          : !profileA.imageDigest
+            ? `missing_eigencompute_image_digest:${a.id}`
+            : `missing_eigencompute_image_digest:${b.id}`,
+        profiles: {
+          [a.id]: profileA,
+          [b.id]: profileB
+        },
+        requireEnvironment,
+        requireImageDigest,
+        requireSigner
+      };
+    }
+  }
+
+  if (requireSigner) {
+    if (!profileA.signerAddress || !profileB.signerAddress) {
+      return {
+        required: true,
+        enforced: true,
+        passed: false,
+        reason: !profileA.signerAddress && !profileB.signerAddress
+          ? 'missing_eigencompute_signer_profiles'
+          : !profileA.signerAddress
+            ? `missing_eigencompute_signer:${a.id}`
+            : `missing_eigencompute_signer:${b.id}`,
+        profiles: {
+          [a.id]: profileA,
+          [b.id]: profileB
+        },
+        requireEnvironment,
+        requireImageDigest,
+        requireSigner
+      };
+    }
   }
 
   const mismatchedFields: Array<'environment' | 'imageDigest'> = [];
@@ -294,6 +457,9 @@ export function checkEigenComputeParity(
         [a.id]: profileA,
         [b.id]: profileB
       },
+      requireEnvironment,
+      requireImageDigest,
+      requireSigner,
       mismatchedFields
     };
   }
@@ -305,7 +471,134 @@ export function checkEigenComputeParity(
     profiles: {
       [a.id]: profileA,
       [b.id]: profileB
+    },
+    requireEnvironment,
+    requireImageDigest,
+    requireSigner
+  };
+}
+
+export function checkAgentIndependence(
+  agents: RegisteredAgent[],
+  required = independentAgentsRequiredByDefault()
+): AgentIndependenceResult {
+  if (!required) {
+    return {
+      required: false,
+      enforced: false,
+      passed: true,
+      reasons: []
+    };
+  }
+
+  if (agents.length !== 2) {
+    return {
+      required: true,
+      enforced: true,
+      passed: false,
+      reason: 'exactly_two_agents_required',
+      reasons: ['exactly_two_agents_required']
+    };
+  }
+
+  const [a, b] = agents;
+  const reasons: string[] = [];
+
+  const hostA = endpointHost(a.endpoint);
+  const hostB = endpointHost(b.endpoint);
+  if (hostA && hostB && hostA === hostB) {
+    reasons.push('shared_endpoint_host');
+  }
+
+  const payoutA = normalizeAddress(a.payoutAddress);
+  const payoutB = normalizeAddress(b.payoutAddress);
+  if (payoutA && payoutB && payoutA === payoutB) {
+    reasons.push('shared_payout_address');
+  }
+
+  const keyA = normalizeText(a.apiKey);
+  const keyB = normalizeText(b.apiKey);
+  if (keyA && keyB && keyA === keyB) {
+    reasons.push('shared_agent_api_key');
+  }
+
+  const eigenA = extractEigenComputeProfile(a);
+  const eigenB = extractEigenComputeProfile(b);
+  if (eigenA?.appId && eigenB?.appId && eigenA.appId.toLowerCase() === eigenB.appId.toLowerCase()) {
+    reasons.push('shared_eigencompute_app');
+  }
+
+  if (eigenA?.signerAddress && eigenB?.signerAddress && eigenA.signerAddress === eigenB.signerAddress) {
+    reasons.push('shared_eigencompute_signer');
+  }
+
+  if (reasons.length > 0) {
+    return {
+      required: true,
+      enforced: true,
+      passed: false,
+      reason: `agent_independence_failed:${reasons.join(',')}`,
+      reasons
+    };
+  }
+
+  return {
+    required: true,
+    enforced: true,
+    passed: true,
+    reasons: []
+  };
+}
+
+function defaultCollusionRisk(required: boolean): CollusionRiskResult {
+  return {
+    required,
+    enforced: false,
+    passed: true,
+    reasons: []
+  };
+}
+
+function resolveEigenTurnProofPolicy(params: {
+  required: boolean;
+  signerRequired: boolean;
+  eigenCompute: EigenComputeParityResult;
+}): EigenTurnProofPolicyResult {
+  if (!params.required) {
+    return {
+      required: false,
+      signerRequired: params.signerRequired,
+      passed: true
+    };
+  }
+
+  if (!params.eigenCompute.passed) {
+    return {
+      required: true,
+      signerRequired: params.signerRequired,
+      passed: false,
+      reason: params.eigenCompute.reason || 'eigencompute_policy_failed'
+    };
+  }
+
+  if (params.signerRequired) {
+    const missingSigner = Object.entries(params.eigenCompute.profiles)
+      .find(([, profile]) => !profile.signerAddress);
+
+    if (missingSigner) {
+      return {
+        required: true,
+        signerRequired: true,
+        passed: false,
+        reason: `missing_eigencompute_signer:${missingSigner[0]}`
+      };
     }
+  }
+
+  return {
+    required: true,
+    signerRequired: params.signerRequired,
+    passed: true
   };
 }
 
@@ -315,13 +608,37 @@ export function evaluateStrictSandboxPolicy(params: {
   requireParity?: boolean;
   requireEigenCompute?: boolean;
   endpointModeRequired?: boolean;
+  requireIndependentAgents?: boolean;
+  requireEigenTurnProof?: boolean;
+  requireEigenSigner?: boolean;
+  collusionRisk?: CollusionRiskResult;
 }): StrictSandboxPolicyResult {
   const requireParity = params.requireParity ?? sandboxParityRequiredByDefault();
   const requireEigenCompute = params.requireEigenCompute ?? eigenComputeRequiredByDefault();
+  const requireEigenSigner = params.requireEigenSigner ?? eigenSignerRequiredByDefault();
+  const requireEigenTurnProof = params.requireEigenTurnProof ?? eigenTurnProofRequiredByDefault();
   const endpointModeRequired = params.endpointModeRequired ?? endpointExecutionRequiredByDefault();
+  const requireIndependentAgents = params.requireIndependentAgents ?? independentAgentsRequiredByDefault();
+  const requireAntiCollusion = antiCollusionRequiredByDefault();
 
   const parity = checkSandboxParity(params.agents, requireParity);
-  const eigenCompute = checkEigenComputeParity(params.agents, requireEigenCompute);
+  const eigenCompute = checkEigenComputeParity(params.agents, {
+    required: requireEigenCompute,
+    requireSigner: requireEigenSigner
+  });
+  const eigenTurnProof = resolveEigenTurnProofPolicy({
+    required: requireEigenTurnProof,
+    signerRequired: requireEigenSigner,
+    eigenCompute
+  });
+  const independence = checkAgentIndependence(params.agents, requireIndependentAgents);
+
+  const collusion = params.collusionRisk
+    ? {
+      ...params.collusionRisk,
+      required: requireAntiCollusion
+    }
+    : defaultCollusionRisk(requireAntiCollusion);
 
   const nonEndpointAgents = params.agents.filter((agent) => resolveAgentExecutionMode(agent) !== 'endpoint');
 
@@ -337,9 +654,21 @@ export function evaluateStrictSandboxPolicy(params: {
       ? parity.reason
       : !eigenCompute.passed
         ? eigenCompute.reason
-        : undefined;
+        : !eigenTurnProof.passed
+          ? eigenTurnProof.reason
+          : !independence.passed
+            ? independence.reason
+            : collusion.required && collusion.enforced && !collusion.passed
+              ? collusion.reason || (collusion.reasons.length > 0 ? `collusion_risk:${collusion.reasons.join(',')}` : 'collusion_risk_detected')
+              : undefined;
 
-  const passed = endpointModePassed && parity.passed && eigenCompute.passed;
+  const passed = endpointModePassed
+    && parity.passed
+    && eigenCompute.passed
+    && eigenTurnProof.passed
+    && independence.passed
+    && (!collusion.required || !collusion.enforced || collusion.passed);
+
   const strictVerified = passed && params.executionMode === 'endpoint';
 
   return {
@@ -350,7 +679,10 @@ export function evaluateStrictSandboxPolicy(params: {
     endpointModePassed,
     strictVerified,
     parity,
-    eigenCompute
+    eigenCompute,
+    eigenTurnProof,
+    independence,
+    collusion
   };
 }
 
@@ -367,8 +699,25 @@ export function toMatchFairnessAudit(result: StrictSandboxPolicyResult): MatchFa
     eigenComputeEnforced: result.eigenCompute.enforced,
     eigenComputePassed: result.eigenCompute.passed,
     eigenComputeProfiles: result.eigenCompute.profiles,
+    eigenComputeEnvironmentRequired: result.eigenCompute.requireEnvironment,
+    eigenComputeImageDigestRequired: result.eigenCompute.requireImageDigest,
+    eigenSignerRequired: result.eigenCompute.requireSigner,
+    eigenTurnProofRequired: result.eigenTurnProof.required,
+    eigenTurnProofPassed: result.eigenTurnProof.passed,
+    independentAgentsRequired: result.independence.required,
+    independentAgentsPassed: result.independence.passed,
+    independentAgentsReasons: result.independence.reasons,
+    collusionCheckRequired: result.collusion.required,
+    collusionCheckPassed: result.collusion.passed,
+    collusionRiskReasons: result.collusion.reasons,
+    collusionMetrics: result.collusion.metrics,
     strictVerified: result.strictVerified,
-    rejectionReason: result.reason ?? result.parity.reason ?? result.eigenCompute.reason
+    rejectionReason: result.reason
+      ?? result.parity.reason
+      ?? result.eigenCompute.reason
+      ?? result.eigenTurnProof.reason
+      ?? result.independence.reason
+      ?? result.collusion.reason
   };
 }
 
@@ -378,6 +727,13 @@ export function isStrictFairnessAudit(fairness?: MatchFairnessAudit): boolean {
   if (fairness.endpointExecutionRequired && !fairness.endpointExecutionPassed) return false;
   if (fairness.sandboxParityEnforced && !fairness.sandboxParityPassed) return false;
   if (fairness.eigenComputeEnforced && !fairness.eigenComputePassed) return false;
+  if (fairness.independentAgentsRequired && fairness.independentAgentsPassed !== true) return false;
+  if (fairness.collusionCheckRequired && fairness.collusionCheckPassed !== true) return false;
+  if (fairness.eigenTurnProofRequired && fairness.eigenTurnProofPassed !== true) return false;
+  if (fairness.eigenSignerRequired) {
+    const profiles = Object.values(fairness.eigenComputeProfiles || {});
+    if (profiles.length === 0 || profiles.some((profile) => !profile.signerAddress)) return false;
+  }
   return fairness.strictVerified === true;
 }
 

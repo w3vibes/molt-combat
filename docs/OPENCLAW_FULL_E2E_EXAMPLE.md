@@ -28,7 +28,7 @@ Then set any missing vars (or override):
 
 ```bash
 # Required operator + API base
-export API_BASE="${API_BASE:-${NEXT_PUBLIC_API_URL:-http://35.231.235.152:3000}}"
+export API_BASE="${API_BASE:-${NEXT_PUBLIC_API_URL}}"
 export OPERATOR_API_KEY="${OPERATOR_API_KEY:-<OPERATOR_API_KEY>}"
 
 # Script auto-fallbacks to AGENT_A_ENDPOINT/AGENT_B_ENDPOINT if A_ENDPOINT/B_ENDPOINT not set
@@ -38,6 +38,10 @@ export B_ENDPOINT="${B_ENDPOINT:-${AGENT_B_ENDPOINT:-http://<AGENT_B_IP>:3000}}"
 # Script auto-fallbacks to ECLOUD_APP_ID_AGENT_A/B if A_APP_ID/B_APP_ID not set
 export A_APP_ID="${A_APP_ID:-${ECLOUD_APP_ID_AGENT_A:-0x...}}"
 export B_APP_ID="${B_APP_ID:-${ECLOUD_APP_ID_AGENT_B:-0x...}}"
+export A_IMAGE_DIGEST="${A_IMAGE_DIGEST:-${AGENT_A_IMAGE_DIGEST:-sha256:...}}"
+export B_IMAGE_DIGEST="${B_IMAGE_DIGEST:-${AGENT_B_IMAGE_DIGEST:-sha256:...}}"
+export A_SIGNER_ADDRESS="${A_SIGNER_ADDRESS:-${AGENT_A_SIGNER_ADDRESS:-0x...}}"
+export B_SIGNER_ADDRESS="${B_SIGNER_ADDRESS:-${AGENT_B_SIGNER_ADDRESS:-0x...}}"
 
 export PLAYER_A_WALLET="0x..."
 export PLAYER_B_WALLET="0x..."
@@ -95,7 +99,10 @@ And in printed JSON summaries:
   - bad chain config, wrong escrow address, invalid stake fields
 
 - `strict_market_subject_required` with `eigencompute_profile_mismatch:imageDigest`
-  - remove digest from both agents or make both identical
+  - align digest values across both agents (or explicitly relax digest requirement)
+
+- `strict_sandbox_policy_failed` with signer/proof reason
+  - verify `eigencompute.signerAddress` is registered and your agent returns valid turn-proof signatures
 
 - market/automation unauthorized
   - wrong `OPERATOR_API_KEY`

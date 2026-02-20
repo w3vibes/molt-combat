@@ -11,6 +11,7 @@ export type EigenComputeProfile = {
   appId: string;
   environment?: string;
   imageDigest?: string;
+  signerAddress?: string;
 };
 
 export type AgentProfile = {
@@ -43,10 +44,18 @@ export type MatchConfig = {
 
 export type MatchExecutionMode = 'endpoint' | 'simple';
 
+export type MatchMeteringPolicy = {
+  maxRequestBytes: number;
+  maxResponseBytes: number;
+  maxLatencyMs: number;
+};
+
 export type MatchTurnEnforcement = {
   timeout: boolean;
   schemaValidation: boolean;
   sandboxParity: boolean;
+  meteringPolicy: boolean;
+  eigenProof: boolean;
 };
 
 export type MatchTurnMetering = {
@@ -60,7 +69,10 @@ export type MatchTurnMetering = {
   fallbackHold: boolean;
   invalidAction: boolean;
   enforcement: MatchTurnEnforcement;
+  policyViolation?: string;
   error?: string;
+  eigenProofVerified?: boolean;
+  eigenProofReason?: string;
 };
 
 export type MatchReplayTurn = {
@@ -68,6 +80,13 @@ export type MatchReplayTurn = {
   actions: Record<string, AgentAction>;
   states: AgentState[];
   metering?: Record<string, MatchTurnMetering>;
+};
+
+export type MatchCollusionMetrics = {
+  headToHeadMatches24h: number;
+  decisiveMatches24h: number;
+  dominantAgentId?: string;
+  dominantWinRate?: number;
 };
 
 export type MatchFairnessAudit = {
@@ -82,6 +101,18 @@ export type MatchFairnessAudit = {
   eigenComputeEnforced?: boolean;
   eigenComputePassed?: boolean;
   eigenComputeProfiles?: Record<string, EigenComputeProfile>;
+  eigenComputeEnvironmentRequired?: boolean;
+  eigenComputeImageDigestRequired?: boolean;
+  eigenSignerRequired?: boolean;
+  eigenTurnProofRequired?: boolean;
+  eigenTurnProofPassed?: boolean;
+  independentAgentsRequired?: boolean;
+  independentAgentsPassed?: boolean;
+  independentAgentsReasons?: string[];
+  collusionCheckRequired?: boolean;
+  collusionCheckPassed?: boolean;
+  collusionRiskReasons?: string[];
+  collusionMetrics?: MatchCollusionMetrics;
   strictVerified?: boolean;
   rejectionReason?: string;
 };
@@ -92,10 +123,13 @@ export type MatchMeteringTotals = {
   timeouts: number;
   fallbackHolds: number;
   invalidActions: number;
+  policyViolations: number;
+  eigenProofFailures: number;
 };
 
 export type MatchAuditRecord = {
   fairness: MatchFairnessAudit;
+  meteringPolicy?: MatchMeteringPolicy;
   meteringTotals: MatchMeteringTotals;
 };
 
@@ -138,11 +172,13 @@ export type MatchAttestationRecord = {
 export type ChallengeStatus = 'open' | 'accepted' | 'running' | 'awaiting_judgement' | 'completed' | 'cancelled';
 
 export type ChallengeStake = {
-  mode: 'none' | 'usdc';
+  mode: 'none' | 'usdc' | 'eth';
   contractAddress?: string;
   amountPerPlayer?: string;
   playerA?: string;
   playerB?: string;
+  amountEth?: string;
+  autoFund?: boolean;
 };
 
 export type ChallengeRecord = {
@@ -209,9 +245,75 @@ export type MarketPositionRecord = {
 
 export type AutomationRunRecord = {
   id: string;
-  automationType: 'escrow_settlement';
+  automationType: 'escrow_settlement' | 'payout_settlement';
   status: 'ok' | 'error';
   startedAt: string;
   finishedAt: string;
   summary: Record<string, unknown>;
+};
+
+export type SeasonStatus = 'draft' | 'active' | 'completed' | 'archived';
+
+export type SeasonRecord = {
+  id: string;
+  name: string;
+  description?: string;
+  status: SeasonStatus;
+  startsAt?: string;
+  endsAt?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TournamentFormat = 'single_elimination';
+export type TournamentStatus = 'draft' | 'active' | 'completed' | 'cancelled';
+
+export type TournamentChallengeTemplate = {
+  config: MatchConfig;
+  stake: ChallengeStake;
+  notesPrefix?: string;
+};
+
+export type TournamentRecord = {
+  id: string;
+  seasonId?: string;
+  name: string;
+  format: TournamentFormat;
+  status: TournamentStatus;
+  participantAgentIds: string[];
+  challengeTemplate: TournamentChallengeTemplate;
+  championAgentId?: string;
+  metadata?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TournamentRoundStatus = 'pending' | 'active' | 'completed';
+
+export type TournamentRoundRecord = {
+  id: string;
+  tournamentId: string;
+  roundNumber: number;
+  status: TournamentRoundStatus;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TournamentFixtureStatus = 'pending' | 'ready' | 'running' | 'completed' | 'cancelled';
+
+export type TournamentFixtureRecord = {
+  id: string;
+  tournamentId: string;
+  roundNumber: number;
+  slotNumber: number;
+  status: TournamentFixtureStatus;
+  agentAId?: string;
+  agentBId?: string;
+  challengeId?: string;
+  matchId?: string;
+  winnerAgentId?: string;
+  notes?: string;
+  createdAt: string;
+  updatedAt: string;
 };

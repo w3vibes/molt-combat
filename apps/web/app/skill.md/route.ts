@@ -1,16 +1,8 @@
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
-import { proxyRequest } from '../api/_lib/proxy';
+import { proxyRequest, resolveBackendBaseUrl } from '../api/_lib/proxy';
 
 export const dynamic = 'force-dynamic';
-
-function backendBaseUrl(): string {
-  return (
-    process.env.BACKEND_API_URL?.trim() ||
-    process.env.NEXT_PUBLIC_API_URL?.trim() ||
-    'http://localhost:3000'
-  ).replace(/\/$/, '');
-}
 
 function frontendOrigin(req: NextRequest): string {
   const forwardedProto = req.headers.get('x-forwarded-proto')?.split(',')[0]?.trim();
@@ -37,16 +29,20 @@ async function serveSkill(req: NextRequest, method: 'GET' | 'HEAD') {
   if (!proxied.ok) return proxied;
 
   const original = method === 'HEAD' ? '' : await proxied.text();
+  const backendBase = resolveBackendBaseUrl(req);
   const rewritten = method === 'HEAD'
     ? ''
-    : rewriteSkillMarkdown(original, backendBaseUrl(), frontendOrigin(req));
+    : rewriteSkillMarkdown(original, backendBase || '', frontendOrigin(req));
+
+  const headers = new Headers(proxied.headers);
+  headers.delete('content-length');
+  headers.delete('content-encoding');
+  headers.set('content-type', headers.get('content-type') || 'text/markdown; charset=utf-8');
+  headers.set('cache-control', 'no-store');
 
   return new NextResponse(rewritten, {
     status: proxied.status,
-    headers: {
-      'content-type': proxied.headers.get('content-type') || 'text/markdown; charset=utf-8',
-      'cache-control': 'no-store'
-    }
+    headers
   });
 }
 
