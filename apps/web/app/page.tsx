@@ -1,15 +1,105 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import {
-  frontendApi,
-  type AgentSummary,
-  type Challenge,
-  type ChallengeStatus,
-  type MatchSummary,
-  type TrustedLeaderboardResponse,
-  type VerificationResponse
-} from '@/lib/api';
+
+type ChallengeStatus = 'open' | 'accepted' | 'running' | 'awaiting_judgement' | 'completed' | 'cancelled';
+
+type Challenge = {
+  id: string;
+  topic: string;
+  status: ChallengeStatus;
+  challengerAgentId: string;
+  opponentAgentId?: string;
+  matchId?: string;
+  winnerAgentId?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ChallengesResponse = {
+  ok: boolean;
+  challenges: Challenge[];
+};
+
+type MatchSummary = {
+  id: string;
+  status: string;
+  winner?: string;
+  startedAt: string;
+  turnsPlayed: number;
+};
+
+type AgentSummary = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  lastHealthStatus: 'unknown' | 'healthy' | 'unhealthy';
+};
+
+type VerificationResponse = {
+  ok: boolean;
+  environment: string;
+  appIds: string[];
+  checks: {
+    strictMode?: {
+      requireEndpointMode: boolean;
+      requireSandboxParity: boolean;
+      requireEigenCompute: boolean;
+      allowSimpleMode: boolean;
+    };
+  };
+};
+
+type TrustedLeaderboardRow = {
+  agentId: string;
+  wins: number;
+  losses: number;
+  matches: number;
+  winRate: number;
+};
+
+type TrustedLeaderboardResponse = {
+  ok: boolean;
+  strictOnly: boolean;
+  trustedMatchCount: number;
+  leaderboard: TrustedLeaderboardRow[];
+};
+
+const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3000';
+const readonlyApiKey = process.env.NEXT_PUBLIC_READONLY_API_KEY || '';
+
+async function fetchJson<T>(path: string): Promise<T> {
+  const headers: Record<string, string> = {};
+  if (readonlyApiKey) {
+    headers.authorization = `Bearer ${readonlyApiKey}`;
+  }
+}
+
+  const res = await fetch(`${apiBase}${path}`, {
+    headers,
+    cache: 'no-store'
+  });
+
+  const text = await res.text();
+  const json = text ? JSON.parse(text) : {};
+
+  if (!res.ok) {
+    throw new Error(json?.error || json?.message || `HTTP ${res.status}`);
+  }
+
+function relativeTime(iso?: string) {
+  if (!iso) return '—';
+  const ms = Date.now() - Date.parse(iso);
+  if (!Number.isFinite(ms)) return '—';
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  return `${day}d ago`;
+}
 
 function statusLabel(status: ChallengeStatus) {
   if (status === 'awaiting_judgement') return 'Awaiting Judgement';
@@ -69,19 +159,18 @@ export default function Page() {
 
     const refresh = async () => {
       const results = await Promise.allSettled([
-        frontendApi.getChallenges(),
-        frontendApi.getMatches(),
-        frontendApi.getAgents(),
-        frontendApi.getVerification(),
-        frontendApi.getTrustedLeaderboard(200),
-        frontendApi.getSkillMarkdown()
+        fetchJson<ChallengesResponse>('/challenges'),
+        fetchJson<MatchSummary[]>('/matches'),
+        fetchJson<AgentSummary[]>('/agents'),
+        fetchJson<VerificationResponse>('/verification/eigencompute'),
+        fetchJson<TrustedLeaderboardResponse>('/leaderboard/trusted?limit=200')
       ]);
 
       if (!isMounted) return;
 
       const nextWarnings: string[] = [];
 
-      const [challengesResult, matchesResult, agentsResult, verificationResult, trustedResult, skillResult] = results;
+      const [challengesResult, matchesResult, agentsResult, verificationResult, trustedResult] = results;
 
       if (challengesResult.status === 'fulfilled') {
         setChallenges(challengesResult.value.challenges || []);
@@ -113,10 +202,6 @@ export default function Page() {
       } else {
         setTrusted(null);
         nextWarnings.push(`trusted leaderboard: ${trustedResult.reason?.message || 'unavailable'}`);
-      }
-
-      if (skillResult.status !== 'fulfilled') {
-        nextWarnings.push(`skill installer: ${skillResult.reason?.message || 'unavailable'}`);
       }
 
       setWarnings(nextWarnings);
@@ -155,7 +240,7 @@ export default function Page() {
   const totalAgents = useMemo(() => agents.filter((a) => a.enabled).length, [agents]);
   const healthyAgents = useMemo(() => agents.filter((a) => a.enabled && a.lastHealthStatus === 'healthy').length, [agents]);
 
-  const skillUrl = frontendApi.getSkillUrl();
+  const skillUrl = `${apiBase}/skill.md`;
 
   async function copySkill() {
     try {
@@ -362,10 +447,10 @@ export default function Page() {
           <article>
             <h3>ENDPOINTS</h3>
             <ul className="mono">
-              <li>{frontendApi.paths.health}</li>
-              <li>{frontendApi.paths.verification}</li>
-              <li>{frontendApi.paths.trustedLeaderboard}</li>
-              <li>{frontendApi.paths.challenges}</li>
+              <li>{apiBase}/health</li>
+              <li>{apiBase}/verification/eigencompute</li>
+              <li>{apiBase}/leaderboard/trusted</li>
+              <li>{apiBase}/challenges</li>
             </ul>
           </article>
         </section>
