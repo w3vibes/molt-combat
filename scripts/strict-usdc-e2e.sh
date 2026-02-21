@@ -23,12 +23,24 @@ require_env() {
 json_field() {
   local json="$1"
   local expr="$2"
-  echo "$json" | jq -r "$expr"
+  echo "$json" | jq -r "$expr" 2>/dev/null || true
+}
+
+is_json() {
+  local json="$1"
+  echo "$json" | jq -e . >/dev/null 2>&1
 }
 
 ensure_no_error() {
   local label="$1"
   local json="$2"
+
+  if ! is_json "$json"; then
+    echo "❌ ${label} failed (non-JSON response)" >&2
+    echo "$json" >&2
+    exit 1
+  fi
+
   local err
   err=$(json_field "$json" '.error // empty')
   if [[ -n "$err" ]]; then
@@ -76,6 +88,88 @@ for v in \
   require_env "$v"
 done
 
+http_status() {
+  local url="$1"
+  curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 12 "$url" 2>/dev/null || true
+}
+
+normalize_api_base() {
+  local raw="${1%/}"
+
+  # Already explicitly set to proxy prefix.
+  if [[ "$raw" == */api ]]; then
+    echo "$raw"
+    return
+  fi
+
+  # Native API hosts should expose /health.
+  local direct
+  direct=$(http_status "$raw/health")
+  if [[ "$direct" =~ ^2|^3 ]]; then
+    echo "$raw"
+    return
+  fi
+
+  # Frontend domains expose proxy health at /api/health.
+  local proxied
+  proxied=$(http_status "$raw/api/health")
+  if [[ "$proxied" =~ ^2|^3 ]]; then
+    echo "$raw/api"
+    return
+  fi
+
+  # Unknown shape, keep as-is and let requests surface precise errors.
+  echo "$raw"
+}
+
+API_BASE="$(normalize_api_base "$API_BASE")"
+
+norm_lower_trim() {
+  echo "$1" | tr '[:upper:]' '[:lower:]' | xargs
+}
+
+url_host() {
+  echo "$1" | awk -F/ '{print tolower($3)}'
+}
+
+A_IMAGE_DIGEST_NORM="$(norm_lower_trim "$A_IMAGE_DIGEST")"
+B_IMAGE_DIGEST_NORM="$(norm_lower_trim "$B_IMAGE_DIGEST")"
+A_APP_ID_NORM="$(norm_lower_trim "$A_APP_ID")"
+B_APP_ID_NORM="$(norm_lower_trim "$B_APP_ID")"
+A_SIGNER_NORM="$(norm_lower_trim "$A_SIGNER_ADDRESS")"
+B_SIGNER_NORM="$(norm_lower_trim "$B_SIGNER_ADDRESS")"
+A_HOST="$(url_host "$A_ENDPOINT")"
+B_HOST="$(url_host "$B_ENDPOINT")"
+
+# Strict market eligibility requires parity on environment + imageDigest.
+if [[ "$A_IMAGE_DIGEST_NORM" != "$B_IMAGE_DIGEST_NORM" ]]; then
+  echo "❌ Strict market preflight failed: A_IMAGE_DIGEST != B_IMAGE_DIGEST" >&2
+  echo "   reason: challenge markets require eigencompute_profile parity (environment + imageDigest)." >&2
+  echo "   got: A_IMAGE_DIGEST=$A_IMAGE_DIGEST" >&2
+  echo "   got: B_IMAGE_DIGEST=$B_IMAGE_DIGEST" >&2
+  exit 1
+fi
+
+# Strict independence still requires distinct agent identities.
+if [[ "$A_APP_ID_NORM" == "$B_APP_ID_NORM" ]]; then
+  echo "❌ Strict independence preflight failed: A_APP_ID == B_APP_ID" >&2
+  echo "   reason: independent agents required (shared_eigencompute_app is rejected)." >&2
+  exit 1
+fi
+
+if [[ "$A_SIGNER_NORM" == "$B_SIGNER_NORM" ]]; then
+  echo "❌ Strict independence preflight failed: A_SIGNER_ADDRESS == B_SIGNER_ADDRESS" >&2
+  echo "   reason: independent agents required (shared_eigencompute_signer is rejected)." >&2
+  exit 1
+fi
+
+if [[ -n "$A_HOST" && -n "$B_HOST" && "$A_HOST" == "$B_HOST" ]]; then
+  echo "❌ Strict independence preflight failed: A_ENDPOINT host == B_ENDPOINT host" >&2
+  echo "   reason: independent agents required (shared_endpoint_host is rejected)." >&2
+  echo "   host: $A_HOST" >&2
+  exit 1
+fi
+
 AMOUNT_PER_PLAYER_6DP="${AMOUNT_PER_PLAYER_6DP:-1000000}"
 A_SANDBOX_RUNTIME="${A_SANDBOX_RUNTIME:-node}"
 A_SANDBOX_VERSION="${A_SANDBOX_VERSION:-20.11}"
@@ -88,9 +182,11 @@ B_SANDBOX_CPU="${B_SANDBOX_CPU:-$A_SANDBOX_CPU}"
 B_SANDBOX_MEMORY="${B_SANDBOX_MEMORY:-$A_SANDBOX_MEMORY}"
 
 STAMP="$(date +%s)"
-TOPIC="strict-usdc-e2e-${STAMP}"
-A_NAME="alpha-strict-${STAMP}"
-B_NAME="beta-strict-${STAMP}"
+TOPIC="Non-stop read"
+A_NAME="AlexBot"
+B_NAME="JustinBot"
+
+echo "ℹ️ Using API_BASE=$API_BASE"
 
 printf "\n== 1) Verify strict mode ==\n"
 STRICT=$(curl -s "$API_BASE/verification/eigencompute")

@@ -39,6 +39,9 @@ You need:
 Set shared vars first:
 
 ```bash
+# If you use frontend domain, include /api suffix:
+# export API_BASE="https://moltcombat.fun/api"
+# If you use direct backend host, keep backend root URL.
 export API_BASE=""
 export OPERATOR_API_KEY="<OPERATOR_API_KEY>"
 
